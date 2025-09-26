@@ -2,21 +2,6 @@
   "electron.exe": {
     "productive": 0.0,
     "unproductive": 0.0,
-    "neutral": 5.015361070632935
-  },
-  "windsurf.exe": {
-    "productive": 0.0,
-    "unproductive": 0.0,
-    "neutral": 49.390583515167236
-  },
-  "chrome.exe": {
-    "productive": 0.0,
-    "unproductive": 0.0,
-    "neutral": 57.3737587928772
-  },
-  "explorer.exe": {
-    "productive": 0.0,
-    "unproductive": 0.0,
-    "neutral": 1.0009956359863281
+    "neutral": 3.267899990081787
   }
 }

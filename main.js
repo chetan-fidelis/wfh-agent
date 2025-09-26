@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, nativeTheme, Notification, powerMonitor, Tray, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, nativeTheme, Notification, powerMonitor, Tray, Menu, autoUpdater } = require('electron');
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -26,13 +26,23 @@ function createTray() {
         dashWin.focus();
       } catch (_) {}
     };
-    const contextMenu = Menu.buildFromTemplate([
-      { label: 'Show Dashboard', click: showDashboard },
-      { type: 'separator' },
-      { label: 'Quit', click: () => { isQuitting = true; app.quit(); } }
-    ]);
-    tray.setContextMenu(contextMenu);
+    const buildMenu = () => {
+      const items = [
+        { label: 'Show Dashboard', click: showDashboard },
+        { type: 'separator' },
+        { label: 'Check for Updates…', enabled: app.isPackaged && !updateState.checking, click: () => checkForUpdates() },
+        { label: updateState.available && !updateState.downloaded ? 'Download Update' : 'Download Update', enabled: app.isPackaged && updateState.available && !updateState.downloaded, click: () => downloadUpdate() },
+        { label: 'Install and Restart', enabled: app.isPackaged && updateState.downloaded, click: () => installAndRestart() },
+        { type: 'separator' },
+        { label: 'Quit', click: () => { isQuitting = true; app.quit(); } }
+      ];
+      const m = Menu.buildFromTemplate(items);
+      tray.setContextMenu(m);
+    };
+    buildMenu();
     tray.on('click', showDashboard);
+    tray.on('right-click', () => tray.popUpContextMenu());
+    tray._rebuildMenu = buildMenu; // store for updater events
     return tray;
   } catch (e) {
     console.warn('Failed to create system tray:', e.message);
@@ -311,6 +321,13 @@ let dashWin = null;
 let backendProc = null;
 let tray = null;
 let isQuitting = false;
+let updateState = {
+  checking: false,
+  available: false,
+  downloaded: false,
+  version: null,
+  progress: null,
+};
 
 async function waitForBackend(url, timeoutMs = 60000) {
   const start = Date.now();
@@ -378,6 +395,7 @@ function createSplash() {
     transparent: true,
     resizable: false,
     alwaysOnTop: true,
+    icon: path.join(ASSETS_DIR, 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -395,6 +413,7 @@ function createLogin() {
     autoHideMenuBar: true,
     frame: false,
     title: 'Login',
+    icon: path.join(ASSETS_DIR, 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -413,6 +432,7 @@ function createDashboard() {
     autoHideMenuBar: true,
     frame: false,
     title: 'Dashboard',
+    icon: path.join(ASSETS_DIR, 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -521,6 +541,8 @@ app.whenReady().then(async () => {
   try { app.setAppUserModelId('com.wfh.agent'); } catch (_) { }
   // Create tray early
   createTray();
+  // Setup auto-updater if packaged
+  setupAutoUpdater();
   try {
     // Auto-start at OS login
     app.setLoginItemSettings({ openAtLogin: true, openAsHidden: false });
@@ -792,6 +814,70 @@ ipcMain.handle('window:close', async () => {
   }
   return { ok: false, error: 'no window' };
 });
+
+// ===== Auto Updater (core) =====
+function notify(title, body) {
+  try {
+    new Notification({ title, body }).show();
+  } catch (_) {}
+}
+
+function setupAutoUpdater() {
+  if (!app.isPackaged) return; // only in packaged builds
+  try {
+    const pkg = require(path.join(__dirname, 'package.json'));
+    const repo = 'chetan-fidelis/wfh-agent';
+    // Using update.electronjs.org for GitHub provider
+    // See: https://www.electronjs.org/docs/latest/tutorial/updates
+    const feedURL = `https://update.electronjs.org/${repo}/${process.platform}-${process.arch}/${pkg.version}`;
+    // setFeedURL is required on win32/darwin for core autoUpdater
+    autoUpdater.setFeedURL({ url: feedURL });
+
+    autoUpdater.on('checking-for-update', () => {
+      updateState.checking = true; updateState.available = false; updateState.downloaded = false; updateState.progress = null;
+      if (tray && tray._rebuildMenu) tray._rebuildMenu();
+    });
+    autoUpdater.on('update-available', (info) => {
+      updateState.checking = false; updateState.available = true; updateState.version = info && info.version;
+      notify('Update available', `Version ${updateState.version || ''} is available. Open tray to download.`);
+      if (tray && tray._rebuildMenu) tray._rebuildMenu();
+    });
+    autoUpdater.on('update-not-available', () => {
+      updateState.checking = false; updateState.available = false; updateState.downloaded = false;
+      notify('No updates', 'You are on the latest version.');
+      if (tray && tray._rebuildMenu) tray._rebuildMenu();
+    });
+    autoUpdater.on('error', (err) => {
+      updateState.checking = false;
+      console.warn('autoUpdater error:', err && err.message || err);
+      notify('Update error', (err && err.message) || 'Unknown error');
+      if (tray && tray._rebuildMenu) tray._rebuildMenu();
+    });
+    autoUpdater.on('download-progress', (p) => {
+      updateState.progress = p;
+    });
+    autoUpdater.on('update-downloaded', (info) => {
+      updateState.downloaded = true; updateState.available = true; updateState.checking = false;
+      notify('Update ready', 'Install and restart to apply the update.');
+      if (tray && tray._rebuildMenu) tray._rebuildMenu();
+    });
+  } catch (e) {
+    console.warn('Failed to setup autoUpdater:', e.message);
+  }
+}
+
+function checkForUpdates() {
+  if (!app.isPackaged) { notify('Updater disabled', 'Updates only work in packaged builds.'); return; }
+  try { autoUpdater.checkForUpdates(); } catch (e) { console.warn('checkForUpdates failed:', e.message); }
+}
+function downloadUpdate() {
+  if (!app.isPackaged) return;
+  try { autoUpdater.downloadUpdate(); } catch (e) { console.warn('downloadUpdate failed:', e.message); }
+}
+function installAndRestart() {
+  if (!app.isPackaged) return;
+  try { autoUpdater.quitAndInstall(); } catch (e) { console.warn('quitAndInstall failed:', e.message); }
+}
 
 // Network status for UI (Office vs Remote)
 ipcMain.handle('net:status', async () => {

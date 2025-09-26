@@ -3,22 +3,24 @@
   "version": "0.1.0",
   "description": "WFH Agent Desktop (Electron)",
   "main": "main.js",
-  "author": "",
+  "author": "Fidelis Technology Services Pvt. Ltd.",
   "license": "MIT",
   "scripts": {
     "start": "electron .",
     "dev": "electron .",
-    "build": "electron-builder -w"
+    "pack:win": "npx @electron/packager . \"WFH Agent\" --platform=win32 --arch=x64 --out=dist --overwrite --prune=true --icon=assets/icon.ico --ignore=^dist$ --ignore=^release$ --ignore=monitor_data/shots --ignore=^build$",
+    "dist:win": "node scripts/build-win.js"
   },
   "dependencies": {
-    "axios": "^1.7.7",
-    "electron": "^31.3.0"
+    "axios": "^1.7.7"
   },
   "devDependencies": {
-    "electron-builder": "^24.13.3"
+    "@electron/packager": "^18.3.6",
+    "electron-winstaller": "^5.1.0",
+    "electron": "^31.3.0"
   },
   "build": {
-    "appId": "com.wfh.agent",
+    "appId": "com.fidelis.wfh.agent",
     "productName": "WFH Agent",
     "directories": {
       "output": "build"
