@@ -1,0 +1,18 @@
+{
+  "hostname": "Fidelis-Group",
+  "platform": "Windows-11-10.0.26100-SP0",
+  "system": "Windows",
+  "release": "11",
+  "version": "10.0.26100",
+  "processor": "Intel64 Family 6 Model 183 Stepping 1, GenuineIntel",
+  "python": "3.13.7 (tags/v3.13.7:bcee1c3, Aug 14 2025, 14:15:11) [MSC v.1944 64 bit (AMD64)]",
+  "users": [
+    "Chetan"
+  ],
+  "boot_time": "2025-09-22T17:05:02.919379",
+  "battery": {
+    "percent": 65,
+    "power_plugged": false,
+    "secsleft": 4410
+  }
+}

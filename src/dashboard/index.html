@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dashboard - WFH Agent</title>
+  <link rel="stylesheet" href="../styles/global.css">
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="header-left">
+        <div class="logo-container">
+          <img src="../../assets/Logo_Fidelis.png" alt="Company Logo" style="width: 120px; padding: 8px;">
+        </div>
+        <h1 class="title">WFH</h1>
+        <div id="banner" class="app-banner" style="display:none;">
+          <span id="bannerText"></span>
+          <button id="bannerClose" class="btn sm" style="margin-left:auto;">Dismiss</button>
+        </div>
+      </div>
+      <div class="header-right">
+        <div class="toolbar">
+          <button id="startBtn" class="btn sm green">Start Work</button>
+          <button id="breakBtn" class="btn sm yellow">Take Break</button>
+          <button id="endBtn" class="btn sm red">End Work</button>
+          <button id="logoutBtn" class="btn sm">Logout</button>
+        </div>
+        <div class="win-controls">
+          <div id="winMin" class="win-btn" title="Minimize"><span></span></div>
+          <div id="winMax" class="win-btn max" title="Maximize"><span></span></div>
+          <div id="winClose" class="win-btn close" title="Close"><span></span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="content scrollbar-hide">
+      <div id="profile" class="card profile-card">
+        <div class="profile-grid">
+          <div class="profile-section">
+            <h3>Employee</h3>
+            <div class="profile-name" id="empName">Loading...</div>
+            <div class="profile-meta" id="empMeta">Employee Information</div>
+          </div>
+          <div class="profile-section">
+            <h3>Manager</h3>
+            <div class="profile-name" id="mgrName">Loading...</div>
+            <div class="profile-meta" id="mgrMeta">Manager Information</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="kpi-grid">
+        <div class="card">
+          <div class="kpi">
+            <div class="kpi-label">Total Work Time</div>
+            <div class="kpi-value" id="kpiTotalWork">0m</div>
+            <div class="kpi-desc">This Period</div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="kpi">
+            <div class="kpi-label">Active Sessions</div>
+            <div class="kpi-value" id="kpiSessions">0</div>
+            <div class="kpi-desc">Sessions Completed</div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="kpi">
+            <div class="kpi-label">Break Time</div>
+            <div class="kpi-value" id="kpiBreak">0m</div>
+            <div class="kpi-desc">Total Breaks</div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="kpi">
+            <div class="kpi-label">Average Session</div>
+            <div class="kpi-value" id="kpiAvg">0m</div>
+            <div class="kpi-desc">Average Duration</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card sessions-card">
+        <div class="sessions-header">
+          <div class="sessions-title">Work Sessions</div>
+          <div class="filter-controls">
+            <select id="rangeSel" class="input">
+              <option value="7">Last 7 days</option>
+              <option value="30">Last 30 days</option>
+            </select>
+            <button id="applyRange" class="btn sm">Filter</button>
+          </div>
+        </div>
+        <div style="overflow-x: auto;">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Start Time</th>
+                <th>End Time</th>
+                <th>Work Duration</th>
+                <th>Break Duration</th>
+                <th>Total Duration</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="wsBody">
+              <tr>
+                <td>2024-01-15</td>
+                <td>09:00 AM</td>
+                <td>05:00 PM</td>
+                <td>7h 30m</td>
+                <td>30m</td>
+                <td>8h 00m</td>
+                <td><span class="status-badge status-completed">Completed</span></td>
+              </tr>
+              <tr>
+                <td>2024-01-14</td>
+                <td>09:15 AM</td>
+                <td>04:45 PM</td>
+                <td>7h 00m</td>
+                <td>30m</td>
+                <td>7h 30m</td>
+                <td><span class="status-badge status-completed">Completed</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="table-pagination">
+          <div class="pager-left">
+            <label for="wsPageSize">Rows per page:</label>
+            <select id="wsPageSize" class="input" style="width:auto;">
+              <option value="10">10</option>
+              <option value="25">25</option>
+              <option value="50">50</option>
+            </select>
+          </div>
+          <div class="pager-right">
+            <button id="wsPagePrev" class="btn sm" title="Previous Page">Prev</button>
+            <div id="wsPageNums" class="pager-nums"></div>
+            <span id="wsPageInfo" class="muted" style="margin: 0 8px;">Page 1 of 1</span>
+            <button id="wsPageNext" class="btn sm" title="Next Page">Next</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="footer">
+      <div class="footer-left">
+        <span id="offlineChip" class="chip chip-offline" title="Backend connectivity">Offline</span>
+        <div id="netBadge" class="net-badge" title="Network location">—</div>
+      </div>
+      <div class="footer-right">
+        <span id="footerClock"></span>
+      </div>
+    </div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

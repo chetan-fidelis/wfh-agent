@@ -1,0 +1,34 @@
+{
+  "emp_id": 18698,
+  "features": {
+    "itsm": true,
+    "notifications": true,
+    "break": true,
+    "domain_blocker": true,
+    "screen_record": false,
+    "usb_monitor": true,
+    "website_tracking": true,
+    "esg": true,
+    "scheduled_shots": true
+  },
+  "geo": {
+    "mode": "ip_multi"
+  },
+  "ingestion": {
+    "enabled": true,
+    "mode": "postgres",
+    "batch_size": 200,
+    "flush_interval_sec": 5,
+    "sampling": {
+      "state_change": true,
+      "periodic_sec": 60,
+      "active_burst_sec": 5,
+      "active_burst_cpu_percent": 50
+    },
+    "db": {
+      "url": "postgresql://postgres:zRJUvU28F2OZ@20.197.8.101:5432/employee_monitor",
+      "url_env": "postgresql://postgres:zRJUvU28F2OZ@20.197.8.101:5432/employee_monitor",
+      "schema": "employee_monitor"
+    }
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "name": "wfh-agent-desktop",
+  "version": "0.1.0",
+  "description": "WFH Agent Desktop (Electron)",
+  "main": "main.js",
+  "author": "",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "build": "electron-builder -w"
+  },
+  "dependencies": {
+    "axios": "^1.7.7",
+    "electron": "^31.3.0"
+  },
+  "devDependencies": {
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.wfh.agent",
+    "productName": "WFH Agent",
+    "directories": {
+      "output": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ]
+    }
+  }
+}

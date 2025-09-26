@@ -1,0 +1,38 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Dependency directories
+node_modules/
+jspm_packages/
+
+# Build output
+dist/
+dist-ssr/
+out/
+release/
+build/
+*.asar
+
+# Electron cache
+.electron/
+.electron-gyp/
+.electron-builder/
+electron-builder.yml
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.*
+!.env.example
+
+# VSCode
+.vscode/*
+!.vscode/extensions.json
