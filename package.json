@@ -1,6 +1,6 @@
 {
   "name": "wfh-agent-desktop",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "WFH Agent Desktop (Electron)",
   "main": "main.js",
   "author": "Fidelis Technology Services Pvt. Ltd.",
@@ -8,37 +8,89 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron .",
-    "pack:win": "npx @electron/packager . \"WFH Agent\" --platform=win32 --arch=x64 --out=dist --overwrite --prune=true --icon=assets/icon.ico --ignore=^dist$ --ignore=^release$ --ignore=monitor_data/shots --ignore=^build$",
-    "dist:win": "node scripts/build-win.js"
+    "build:single": "node build-single-installer.js",
+    "build:backend": "cd backend && pip install -r requirements.txt && pyinstaller emp_monitor.spec --clean --noconfirm",
+    "build:electron": "npx electron-builder --win nsis --x64",
+    "clean": "powershell -NoProfile -Command \"$ErrorActionPreference='SilentlyContinue'; Remove-Item -Recurse -Force build,dist,release,backend\\__pycache__,backend\\build,backend\\dist,*.spec,*.log;\""
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/chetan-fidelis/wfh-agent"
   },
   "dependencies": {
-    "axios": "^1.7.7"
+    "axios": "^1.12.2"
+  },
+  "publishConfig": {
+    "provider": "github",
+    "releaseType": "release"
   },
   "devDependencies": {
     "@electron/packager": "^18.3.6",
+    "electron": "^31.3.0",
     "electron-winstaller": "^5.1.0",
-    "electron": "^31.3.0"
+    "electron-builder": "^24.13.3",
+    "archiver": "^7.0.1"
   },
   "build": {
     "appId": "com.fidelis.wfh.agent",
     "productName": "WFH Agent",
     "directories": {
-      "output": "build"
+      "output": "dist"
     },
-    "files": [
-      "main.js",
-      "preload.js",
-      "src/**/*",
-      "assets/**/*",
-      "package.json"
-    ],
     "win": {
       "target": [
         {
           "target": "nsis",
           "arch": ["x64"]
         }
+      ],
+      "icon": "assets/icon.ico",
+      "extraResources": [
+        {
+          "from": "backend/emp_monitor.exe",
+          "to": "backend/emp_monitor.exe"
+        }
       ]
-    }
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "WFH Agent",
+      "uninstallDisplayName": "WFH Agent",
+      "license": null,
+      "warningsAsErrors": false
+    },
+    "compression": "maximum",
+    "electronLanguages": ["en-US"],
+    "files": [
+      "package.json",
+      "main.js",
+      "preload.js",
+      "src/**",
+      "assets/**",
+      "node_modules/**",
+      "backend/emp_monitor.exe",
+      "monitor_data/**",
+      "!backend/**/*.py",
+      "!backend/**/*.spec",
+      "!backend/build/**",
+      "!backend/dist/**",
+      "!scripts/**",
+      "!tests/**",
+      "!**/*.map",
+      "!**/*.md",
+      "!**/*.MD",
+      "!monitor_data/shots/**",
+      "!dist/**",
+      "!release/**",
+      "!build/**",
+      "!.git/**"
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "backend/emp_monitor.exe"
+    ]
   }
 }

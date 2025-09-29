@@ -42,6 +42,7 @@
     togglePassword.addEventListener('click', () => {
       const isPwd = passInput.getAttribute('type') === 'password';
       passInput.setAttribute('type', isPwd ? 'text' : 'password');
+      togglePassword.textContent = isPwd ? '🙈' : '👁️';
     });
   }
 
@@ -60,6 +61,7 @@
   }
 
   loginBtn.addEventListener('click', async () => {
+    console.log('Login button clicked');
     err.textContent = '';
     loginBtn.disabled = true;
     const oldHtml = loginBtn.innerHTML;
@@ -68,23 +70,46 @@
       const serverAuthUrl = (authUrlInput ? authUrlInput.value : 'https://fhq.fidelisam.in/api/auth/login').trim();
       const username = (userInput ? userInput.value : '').trim();
       const password = passInput ? passInput.value : '';
+
+      console.log('Login attempt:', { serverAuthUrl, username: username ? '[PROVIDED]' : '[MISSING]', password: password ? '[PROVIDED]' : '[MISSING]' });
+
       if (!serverAuthUrl || !username || !password) {
-        if (err) err.textContent = 'Please fill all fields';
+        const message = 'Please fill all fields';
+        console.log('Validation error:', message);
+        if (err) {
+          err.textContent = message;
+          err.classList.add('show');
+        }
         return;
       }
       const empIdVal = empIdInput ? empIdInput.value.trim() : '';
       const effectiveEmpId = empIdVal || (cfg.empId || 101);
+
+      console.log('Calling window.api.login...');
       const res = await window.api.login(serverAuthUrl, username, password, effectiveEmpId);
+      console.log('Login response:', res);
+
       if (res && res.ok) {
+        console.log('Login successful, navigating to dashboard');
         await window.api.navTo('dashboard');
       } else {
-        if (err) err.textContent = res.error || 'Login failed';
+        const errorMsg = res?.error || 'Login failed';
+        console.log('Login failed:', errorMsg);
+        if (err) {
+          err.textContent = errorMsg;
+          err.classList.add('show');
+        }
       }
     } catch (e) {
-      if (err) err.textContent = e.message || 'Login error';
+      const errorMsg = e.message || 'Login error';
+      console.error('Login exception:', e);
+      if (err) {
+        err.textContent = errorMsg;
+        err.classList.add('show');
+      }
     } finally {
       loginBtn.disabled = false;
-      loginBtn.innerHTML = oldHtml || 'Login';
+      loginBtn.innerHTML = oldHtml || 'Sign In';
     }
   });
 })();

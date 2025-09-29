@@ -28,11 +28,11 @@
   },
   "2025-09-26": {
     "environmental": {
-      "energy_kwh": 0.0006,
-      "co2_kg": 0.0004
+      "energy_kwh": 0.0002,
+      "co2_kg": 0.0001
     },
     "social": {
-      "work_secs": 90,
+      "work_secs": 24,
       "active_ratio": 1.0,
       "idle_ratio": 0.0,
       "underutilized": true,

@@ -1,0 +1,11 @@
+flask>=2.0.0
+psutil>=5.8.0
+Pillow>=8.0.0
+mss>=6.0.0
+pynput>=1.7.0
+requests>=2.25.0
+win10toast>=0.9
+winsdk>=1.0.0b10
+psycopg[binary]>=3.0.0
+uiautomation>=2.0.0
+PyInstaller>=5.0.0

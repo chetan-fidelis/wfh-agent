@@ -3,7 +3,72 @@ const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const https = require('https');
-const axios = require('axios');
+let axios; try { axios = require('axios'); } catch (_) { axios = null; }
+
+// Minimal HTTP helpers (fallback if axios is unavailable)
+function requestRaw(urlStr, { method = 'GET', headers = {}, body = undefined, timeout = 8000, insecure = false } = {}) {
+  return new Promise((resolve, reject) => {
+    try {
+      const u = new URL(urlStr);
+      const isHttps = u.protocol === 'https:';
+      const mod = isHttps ? require('https') : require('http');
+      const opts = {
+        method,
+        headers: { ...(headers || {}) },
+        rejectUnauthorized: !insecure,
+      };
+      if (insecure && isHttps) {
+        opts.agent = new https.Agent({ rejectUnauthorized: false });
+      }
+      const req = mod.request(u, opts, (res) => {
+        let data = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => { data += chunk || ''; });
+        res.on('end', () => {
+          resolve({ status: res.statusCode || 0, headers: res.headers || {}, body: data });
+        });
+      });
+      req.on('error', reject);
+      if (timeout) {
+        req.setTimeout(timeout, () => { try { req.destroy(new Error('ETIMEDOUT')); } catch (_) {} });
+      }
+      if (body !== undefined && body !== null) {
+        const payload = typeof body === 'string' ? body : JSON.stringify(body);
+        if (!opts.headers['Content-Type']) req.setHeader('Content-Type', 'application/json');
+        req.setHeader('Content-Length', Buffer.byteLength(payload));
+        req.write(payload);
+      }
+      req.end();
+    } catch (e) {
+      reject(e);
+    }
+  });
+}
+
+async function requestJson(urlStr, opts = {}) {
+  const r = await requestRaw(urlStr, opts);
+  if (r.status < 200 || r.status >= 300) throw new Error(`HTTP ${r.status}`);
+  try { return { status: r.status, data: JSON.parse(r.body || 'null') }; } catch (_) { return { status: r.status, data: null }; }
+}
+
+async function httpGet(urlStr, { headers = {}, timeout = 8000, insecure = false } = {}) {
+  if (axios) {
+    const httpsAgent = insecure ? new https.Agent({ rejectUnauthorized: false }) : undefined;
+    const r = await axios.get(urlStr, { headers, timeout, httpsAgent });
+    return { status: r.status, data: r.data };
+  }
+  return await requestJson(urlStr, { method: 'GET', headers, timeout, insecure });
+}
+
+async function httpPost(urlStr, body, { headers = {}, timeout = 8000, insecure = false } = {}) {
+  if (axios) {
+    const httpsAgent = insecure ? new https.Agent({ rejectUnauthorized: false }) : undefined;
+    const r = await axios.post(urlStr, body || {}, { headers, timeout, httpsAgent, validateStatus: () => true });
+    if (r.status < 200 || r.status >= 300) throw new Error(`HTTP ${r.status}`);
+    return { status: r.status, data: r.data };
+  }
+  return await requestJson(urlStr, { method: 'POST', headers, body: body || {}, timeout, insecure });
+}
 
 // Paths
 const ROOT_DIR = path.join(__dirname);
@@ -13,6 +78,21 @@ const MONITOR_CONFIG = path.join(__dirname, 'monitor_data', 'config.json');
 const ALERTS_LOG = path.join(__dirname, 'monitor_data', 'alerts.log');
 const OFFLINE_Q = path.join(__dirname, 'monitor_data', 'offline_queue.json');
 
+// First-run helpers (top-level)
+function userDataPath(...p) { return path.join(app.getPath('userData'), ...p); }
+function firstRunFlagPath() { return userDataPath('first-run.json'); }
+function ensureFirstRunCleanup() {
+  try {
+    if (!fs.existsSync(firstRunFlagPath())) {
+      // Clear any packaged or stale session on first run for this user profile
+      try { fs.unlinkSync(userDataPath('session.json')); } catch (_) {}
+      fs.writeFileSync(firstRunFlagPath(), JSON.stringify({ ts: Date.now(), v: 1 }, null, 2), 'utf-8');
+    }
+  } catch (e) {
+    console.warn('First-run cleanup failed:', e.message);
+  }
+}
+
 function createTray() {
   try {
     if (tray) return tray;
@@ -21,9 +101,28 @@ function createTray() {
     tray.setToolTip('WFH Agent');
     const showDashboard = () => {
       try {
-        if (!dashWin) createDashboard();
-        dashWin.show();
-        dashWin.focus();
+        if (!dashWin || dashWin.isDestroyed()) {
+          // No dashboard window, check if user is properly authenticated
+          const sess = loadSession();
+          const isAuthenticated = sess && sess.token && sess.username;
+          if (isAuthenticated) {
+            createDashboard();
+          } else {
+            // Not properly authenticated, show login instead
+            if (!loginWin || loginWin.isDestroyed()) createLogin();
+            if (loginWin && !loginWin.isDestroyed()) {
+              if (loginWin.isMinimized()) loginWin.restore();
+              loginWin.show();
+              loginWin.focus();
+            }
+            return;
+          }
+        }
+        if (dashWin && !dashWin.isDestroyed()) {
+          if (dashWin.isMinimized()) dashWin.restore();
+          dashWin.show();
+          dashWin.focus();
+        }
       } catch (_) {}
     };
     const buildMenu = () => {
@@ -33,6 +132,8 @@ function createTray() {
         { label: 'Check for Updates…', enabled: app.isPackaged && !updateState.checking, click: () => checkForUpdates() },
         { label: updateState.available && !updateState.downloaded ? 'Download Update' : 'Download Update', enabled: app.isPackaged && updateState.available && !updateState.downloaded, click: () => downloadUpdate() },
         { label: 'Install and Restart', enabled: app.isPackaged && updateState.downloaded, click: () => installAndRestart() },
+        { type: 'separator' },
+        { label: 'Reset App Data', click: () => { try { fs.unlinkSync(userDataPath('session.json')); notify('App data reset', 'Session cleared.'); } catch (e) { notify('Reset failed', e.message || 'Unable to clear session'); } } },
         { type: 'separator' },
         { label: 'Quit', click: () => { isQuitting = true; app.quit(); } }
       ];
@@ -82,8 +183,8 @@ async function canReachBackend() {
     const cfg = loadConfig();
     const base = cfg.serverUrl || 'http://127.0.0.1:5050';
     const url = new URL('/status', base).toString();
-    const r = await axios.get(url, { timeout: 3000 });
-    return !!r;
+    await httpGet(url, { timeout: 3000 });
+    return true;
   } catch (_) { return false; }
 }
 async function drainQueue() {
@@ -97,7 +198,7 @@ async function drainQueue() {
   for (const item of q) {
     try {
       const url = new URL(item.path, base).toString();
-      await axios.post(url, item.body || {}, { timeout: 5000 });
+      await httpPost(url, item.body || {}, { timeout: 5000 });
       if (item.path === '/session/start') startedSynced = true;
     } catch (e) {
       console.warn('drainQueue failed', item.path, e.message);
@@ -117,7 +218,7 @@ async function backendPost(pathname, body) {
     const cfg = loadConfig();
     const base = cfg.serverUrl || 'http://127.0.0.1:5050';
     const url = new URL(pathname, base).toString();
-    await axios.post(url, body || {}, { timeout: 5000 });
+    await httpPost(url, body || {}, { timeout: 5000 });
     return true;
   } catch (e) {
     console.warn('backendPost failed', pathname, e.message);
@@ -336,12 +437,13 @@ async function waitForBackend(url, timeoutMs = 60000) {
       // Try multiple health endpoints
       const statusUrl = new URL('/status', url).toString();
       const stateUrl = new URL('/session/state', url).toString();
-      try { await axios.get(statusUrl, { timeout: 1000 }); return true; } catch (_) { }
-      try { await axios.get(stateUrl, { timeout: 1000 }); return true; } catch (_) { }
-      return true;
+      try { await httpGet(statusUrl, { timeout: 1000 }); return true; } catch (_) { /* ignore */ }
+      try { await httpGet(stateUrl, { timeout: 1000 }); return true; } catch (_) { /* ignore */ }
+      // Neither endpoint responded; wait and retry
     } catch (_) {
       await new Promise(r => setTimeout(r, 500));
     }
+    await new Promise(r => setTimeout(r, 500));
   }
   return false;
 }
@@ -351,36 +453,61 @@ function startBackend() {
     const cfg = loadConfig();
     const projectDir = path.join(__dirname);
     const scriptPath = path.join(projectDir, 'backend', 'emp_monitor.py');
-    // Allow override
-    const override = process.env.EMP_PYTHON_EXE && process.env.EMP_PYTHON_EXE.trim();
-    const candidates = override ? [[override, [scriptPath, '--serve', '--port', '5050']]] : (
-      process.platform === 'win32'
-        ? [["py", ["-3", scriptPath, '--serve', '--port', '5050']], ["python", [scriptPath, '--serve', '--port', '5050']]]
-        : [["python3", [scriptPath, '--serve', '--port', '5050']], ["python", [scriptPath, '--serve', '--port', '5050']]]
-    );
-    let started = false;
-    for (const [cmd, args] of candidates) {
-      try {
-        backendProc = spawn(cmd, args, { cwd: projectDir, stdio: 'pipe', env: process.env });
-        started = true;
-        console.log(`[backend] started: ${cmd} ${args.join(' ')}`);
-        break;
-      } catch (e) {
-        console.warn(`[backend] failed to start with ${cmd}: ${e.message}`);
-        backendProc = null;
+
+    // 1) Try bundled executable first (so Python is not required on target machines)
+    try {
+      const resourcesDir = process.resourcesPath || projectDir;
+      const bundledExe = process.platform === 'win32'
+        ? path.join(resourcesDir, 'backend', 'emp_monitor.exe')
+        : path.join(resourcesDir, 'backend', 'emp_monitor');
+      if (fs.existsSync(bundledExe)) {
+        backendProc = spawn(bundledExe, ['--serve', '--port', '5050'], {
+          cwd: path.dirname(bundledExe),
+          stdio: 'pipe',
+          env: process.env,
+          windowsHide: true,
+        });
+        console.log(`[backend] started bundled: ${bundledExe} --serve --port 5050`);
+      }
+    } catch (e) {
+      console.warn('[backend] bundled start failed:', e.message);
+      backendProc = null;
+    }
+
+    // 2) If no bundled backend, fall back to system Python
+    if (!backendProc) {
+      const override = process.env.EMP_PYTHON_EXE && process.env.EMP_PYTHON_EXE.trim();
+      const candidates = override ? [[override, [scriptPath, '--serve', '--port', '5050']]] : (
+        process.platform === 'win32'
+          ? [["py", ["-3", scriptPath, '--serve', '--port', '5050']], ["python", [scriptPath, '--serve', '--port', '5050']]]
+          : [["python3", [scriptPath, '--serve', '--port', '5050']], ["python", [scriptPath, '--serve', '--port', '5050']]]
+      );
+      for (const [cmd, args] of candidates) {
+        try {
+          backendProc = spawn(cmd, args, { cwd: projectDir, stdio: 'pipe', env: process.env, windowsHide: true });
+          console.log(`[backend] started: ${cmd} ${args.join(' ')}`);
+          break;
+        } catch (e) {
+          console.warn(`[backend] failed to start with ${cmd}: ${e.message}`);
+          backendProc = null;
+        }
       }
     }
-    if (!started) {
-      console.error('No suitable Python interpreter found for backend. Set EMP_PYTHON_EXE to your Python path.');
-      return cfg.serverUrl;
+
+    if (!backendProc) {
+      console.error('Backend not started. Either bundle the backend executable or install Python (set EMP_PYTHON_EXE).');
+      return null;
     }
+
     backendProc.stdout.on('data', d => console.log('[py]', d.toString().trim()));
     backendProc.stderr.on('data', d => console.error('[py]', d.toString().trim()));
     backendProc.on('exit', (code) => {
       console.log('Python backend exited with', code);
       backendProc = null;
     });
-    return cfg.serverUrl;
+
+    // Return the expected local URL; config can still point to remote for HRMS
+    return 'http://127.0.0.1:5050';
   } catch (e) {
     console.error('Failed to start backend:', e);
     return null;
@@ -445,21 +572,58 @@ function createDashboard() {
   dashWin.on('close', (e) => {
     if (!isQuitting) {
       e.preventDefault();
-      dashWin.hide();
+      if (dashWin && !dashWin.isDestroyed()) {
+        dashWin.hide();
+      }
     }
   });
 }
 
 function showLoginOrDashboard() {
   const sess = loadSession();
-  if (sess && sess.token) {
-    createDashboard();
+  // Check if user has valid authentication (token AND username)
+  const isAuthenticated = sess && sess.token && sess.username;
+
+  if (isAuthenticated) {
+    if (!dashWin || dashWin.isDestroyed()) {
+      createDashboard();
+    } else {
+      if (dashWin.isMinimized()) dashWin.restore();
+      dashWin.show();
+      dashWin.focus();
+    }
   } else {
-    createLogin();
+    // Clear invalid session data
+    if (sess && (sess.token || sess.username)) {
+      console.log('Clearing invalid session data');
+      clearSession();
+    }
+    if (!loginWin || loginWin.isDestroyed()) {
+      createLogin();
+    } else {
+      if (loginWin.isMinimized()) loginWin.restore();
+      loginWin.show();
+      loginWin.focus();
+    }
   }
-  if (splashWin) {
+  if (splashWin && !splashWin.isDestroyed()) {
     splashWin.close();
     splashWin = null;
+  }
+}
+
+// Helper function to bring the app to foreground
+function bringToForeground() {
+  if (dashWin && !dashWin.isDestroyed()) {
+    if (dashWin.isMinimized()) dashWin.restore();
+    dashWin.show();
+    dashWin.focus();
+  } else if (loginWin && !loginWin.isDestroyed()) {
+    if (loginWin.isMinimized()) loginWin.restore();
+    loginWin.show();
+    loginWin.focus();
+  } else {
+    showLoginOrDashboard();
   }
 }
 
@@ -479,11 +643,16 @@ async function getPublicIp() {
   ];
   for (const url of endpoints) {
     try {
-      const r = await axios.get(url, { timeout: 4000 });
+      const r = await requestRaw(url, { timeout: 4000 });
       let ip = '';
-      if (typeof r.data === 'string') ip = r.data.trim();
-      else if (r.data && r.data.ip) ip = String(r.data.ip).trim();
-      else if (r.data && (r.data.ip_addr || r.data.ip_address)) ip = String(r.data.ip_addr || r.data.ip_address).trim();
+      if (/json/i.test(r.headers['content-type'] || '') || url.includes('format=json') || url.endsWith('.json')) {
+        try {
+          const jd = JSON.parse(r.body || 'null');
+          if (jd && jd.ip) ip = String(jd.ip).trim();
+          else if (jd && (jd.ip_addr || jd.ip_address)) ip = String(jd.ip_addr || jd.ip_address).trim();
+        } catch (_) { /* treat as text below */ }
+      }
+      if (!ip && typeof r.body === 'string') ip = r.body.trim();
       if (ip) { netCache.ip = ip; netCache.ts = now; return ip; }
     } catch (_) { /* try next */ }
   }
@@ -535,12 +704,29 @@ function isWorkWindowNow(cfg) {
   }
 }
 
+// Single instance lock - prevent multiple instances
+const gotTheLock = app.requestSingleInstanceLock();
+
+if (!gotTheLock) {
+  // Another instance is already running, quit this one
+  app.quit();
+} else {
+  // This is the first instance, handle second instance attempts
+  app.on('second-instance', (event, commandLine, workingDirectory) => {
+    // Someone tried to run a second instance, focus our window instead
+    console.log('Second instance detected, bringing app to foreground');
+    bringToForeground();
+  });
+}
+
 app.whenReady().then(async () => {
   nativeTheme.themeSource = 'light';
   // Ensure notifications work in dev on Windows
   try { app.setAppUserModelId('com.wfh.agent'); } catch (_) { }
   // Create tray early
   createTray();
+  // Clear any baked session on first run (per user profile)
+  ensureFirstRunCleanup();
   // Setup auto-updater if packaged
   setupAutoUpdater();
   try {
@@ -673,25 +859,35 @@ ipcMain.handle('session:update', async (_evt, patch) => {
 ipcMain.handle('auth:login', async (_evt, { serverAuthUrl, username, password, empId }) => {
   try {
     const url = serverAuthUrl; // e.g., https://fhq.fidelisam.in/api/auth/login
+    console.log('[AUTH] Login attempt:', { url, username, empId });
+
     let res;
     try {
       // Laravel example expects { email, password }
-      res = await axios.post(url, { email: username, password }, { timeout: 8000 });
+      const payload = { email: username, password };
+      console.log('[AUTH] Request payload:', payload);
+      res = await httpPost(url, payload, { timeout: 8000 });
+      console.log('[AUTH] Response status:', res.status);
+      console.log('[AUTH] Response data:', res.data);
     } catch (e) {
+      console.error('[AUTH] Request failed:', e.message);
       // Retry with relaxed TLS if certificate cannot be verified
       const msg = (e && (e.code || e.message || '')) + '';
       if (/UNABLE_TO_VERIFY_LEAF_SIGNATURE|SELF_SIGNED_CERT_IN_CHAIN|ERR_SSL|unable to verify the first certificate/i.test(msg)) {
-        const agent = new https.Agent({ rejectUnauthorized: false });
-        res = await axios.post(url, { email: username, password }, { timeout: 8000, httpsAgent: agent, validateStatus: () => true });
-        if (!(res && res.status >= 200 && res.status < 300)) {
-          throw new Error(`Login failed (insecure retry): HTTP ${res && res.status}`);
-        }
+        console.log('[AUTH] Retrying with relaxed TLS...');
+        res = await httpPost(url, { email: username, password }, { timeout: 8000, insecure: true });
+        console.log('[AUTH] Insecure retry status:', res.status);
+        console.log('[AUTH] Insecure retry data:', res.data);
       } else {
         throw e;
       }
     }
+
+    console.log('[AUTH] Checking response for token...');
     if (res && res.data && (res.data.token || res.data.access_token)) {
       const token = res.data.token || res.data.access_token;
+      console.log('[AUTH] Token found, saving session...');
+
       // Derive HRMS API base: if URL contains '/api/', trim after it, else use origin + '/api'
       let hrmsBase = '';
       try {
@@ -708,10 +904,14 @@ ipcMain.handle('auth:login', async (_evt, { serverAuthUrl, username, password, e
       }
       // Persist hrmsEmpId for profile fetches
       saveSession({ token, username, hrmsBase, hrmsEmpId: empId });
+      console.log('[AUTH] Login successful');
       return { ok: true };
     }
-    return { ok: false, error: 'Invalid response from auth API' };
+
+    console.error('[AUTH] No token in response:', res.data);
+    return { ok: false, error: 'Invalid response from auth API - no token received' };
   } catch (e) {
+    console.error('[AUTH] Login error:', e.message);
     return { ok: false, error: e.message };
   }
 });
@@ -731,16 +931,12 @@ ipcMain.handle('api:get', async (_evt, { path: apiPath, baseUrl }) => {
     const headers = {};
     if (sess && sess.token) headers['Authorization'] = `Bearer ${sess.token}`;
     let r;
-    try {
-      r = await axios.get(url, { headers, timeout: 8000 });
-    } catch (e) {
+    try { r = await httpGet(url, { headers, timeout: 8000 }); }
+    catch (e) {
       const msg = (e && (e.code || e.message || '')) + '';
       if (/UNABLE_TO_VERIFY_LEAF_SIGNATURE|SELF_SIGNED_CERT_IN_CHAIN|ERR_SSL|unable to verify the first certificate/i.test(msg)) {
-        const agent = new https.Agent({ rejectUnauthorized: false });
-        r = await axios.get(url, { headers, timeout: 8000, httpsAgent: agent });
-      } else {
-        throw e;
-      }
+        r = await httpGet(url, { headers, timeout: 8000, insecure: true });
+      } else { throw e; }
     }
     return { ok: true, data: r.data };
   } catch (e) {
@@ -758,16 +954,12 @@ ipcMain.handle('hrms:get', async (_evt, { path: apiPath }) => {
     const url = new URL(apiPath, sess.hrmsBase.endsWith('/') ? sess.hrmsBase : sess.hrmsBase + '/').toString();
     const headers = { Authorization: `Bearer ${sess.token}` };
     let r;
-    try {
-      r = await axios.get(url, { headers, timeout: 10000 });
-    } catch (e) {
+    try { r = await httpGet(url, { headers, timeout: 10000 }); }
+    catch (e) {
       const msg = (e && (e.code || e.message || '')) + '';
       if (/UNABLE_TO_VERIFY_LEAF_SIGNATURE|SELF_SIGNED_CERT_IN_CHAIN|ERR_SSL|unable to verify the first certificate/i.test(msg)) {
-        const agent = new https.Agent({ rejectUnauthorized: false });
-        r = await axios.get(url, { headers, timeout: 10000, httpsAgent: agent });
-      } else {
-        throw e;
-      }
+        r = await httpGet(url, { headers, timeout: 10000, insecure: true });
+      } else { throw e; }
     }
     return { ok: true, data: r.data };
   } catch (e) {
@@ -778,13 +970,19 @@ ipcMain.handle('hrms:get', async (_evt, { path: apiPath }) => {
 // Navigation: open dashboard and close login
 ipcMain.handle('nav:to', async (_evt, { name }) => {
   if (name === 'dashboard') {
-    if (!dashWin) createDashboard();
-    if (loginWin) { loginWin.close(); loginWin = null; }
+    if (!dashWin || dashWin.isDestroyed()) createDashboard();
+    if (loginWin && !loginWin.isDestroyed()) {
+      loginWin.close();
+      loginWin = null;
+    }
     return { ok: true };
   }
   if (name === 'login') {
-    if (!loginWin) createLogin();
-    if (dashWin) { dashWin.close(); dashWin = null; }
+    if (!loginWin || loginWin.isDestroyed()) createLogin();
+    if (dashWin && !dashWin.isDestroyed()) {
+      dashWin.close();
+      dashWin = null;
+    }
     return { ok: true };
   }
   return { ok: false, error: 'unknown target' };
@@ -793,20 +991,23 @@ ipcMain.handle('nav:to', async (_evt, { name }) => {
 // Window controls for frameless window
 ipcMain.handle('window:minimize', async () => {
   const w = BrowserWindow.getFocusedWindow() || dashWin || loginWin;
-  if (w) { w.minimize(); return { ok: true }; }
+  if (w && !w.isDestroyed()) {
+    w.minimize();
+    return { ok: true };
+  }
   return { ok: false, error: 'no window' };
 });
 ipcMain.handle('window:maximizeToggle', async () => {
   const w = BrowserWindow.getFocusedWindow() || dashWin || loginWin;
-  if (!w) return { ok: false, error: 'no window' };
+  if (!w || w.isDestroyed()) return { ok: false, error: 'no window' };
   if (w.isMaximized()) { w.unmaximize(); } else { w.maximize(); }
   return { ok: true, maximized: w.isMaximized() };
 });
 ipcMain.handle('window:close', async () => {
   const w = BrowserWindow.getFocusedWindow() || dashWin || loginWin;
   if (w) {
-    if (w === dashWin) {
-      w.hide();
+    if (w === dashWin && dashWin) {
+      dashWin.hide();
       return { ok: true, hidden: true };
     }
     w.close();

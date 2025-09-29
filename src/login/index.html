@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -27,6 +27,14 @@
           <div class="input-container">
             <input id="username" name="username" class="login-input" type="text" placeholder="Enter your email or username" required autocomplete="username" />
             <span class="input-icon">👤</span>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="empId" class="input-label">Employee ID</label>
+          <div class="input-container">
+            <input id="empId" name="empId" class="login-input" type="text" placeholder="Enter your Employee ID" required autocomplete="off" />
+            <span class="input-icon">🆔</span>
           </div>
         </div>
 
@@ -66,12 +74,7 @@
       const errorMessage = document.getElementById('errorMessage');
       const successMessage = document.getElementById('successMessage');
 
-      // Password visibility toggle
-      togglePassword.addEventListener('click', function() {
-        const type = passwordInput.getAttribute('type') === 'password' ? 'text' : 'password';
-        passwordInput.setAttribute('type', type);
-        this.textContent = type === 'password' ? '👁️' : '🙈';
-      });
+      // Password visibility toggle is handled by renderer.js
 
       // Input validation on blur
       usernameInput.addEventListener('blur', function() {

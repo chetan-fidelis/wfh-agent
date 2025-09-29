@@ -1,7 +1,27 @@
 {
+  "code.exe": {
+    "productive": 54.245128870010376,
+    "unproductive": 0.0,
+    "neutral": 0.0
+  },
+  "explorer.exe": {
+    "productive": 0.0,
+    "unproductive": 0.0,
+    "neutral": 5.004459857940674
+  },
   "electron.exe": {
     "productive": 0.0,
     "unproductive": 0.0,
-    "neutral": 3.267899990081787
+    "neutral": 4.002756118774414
+  },
+  "shellexperiencehost.exe": {
+    "productive": 0.0,
+    "unproductive": 0.0,
+    "neutral": 1.0004684925079346
+  },
+  "nvcplui.exe": {
+    "productive": 0.0,
+    "unproductive": 0.0,
+    "neutral": 3.01067852973938
   }
 }
