@@ -37,7 +37,15 @@ PSYCOPG_IMPORT_ERROR = None
 try:
     import psycopg
     try:
-        from psycopg.extras import execute_values
+        # Try different locations for execute_values in psycopg v3
+        try:
+            from psycopg.extras import execute_values
+        except ImportError:
+            try:
+                from psycopg import sql
+                execute_values = None  # Use fallback method
+            except ImportError:
+                execute_values = None
     except Exception as _e_execvals:
         execute_values = None
         PSYCOPG_IMPORT_ERROR = f"psycopg imported but execute_values missing: {_e_execvals}"
@@ -202,7 +210,7 @@ DEFAULT_CONFIG = {
     ,
     "ingestion": {
         "enabled": True,
-        "mode": "file",                 # file | postgres
+        "mode": "postgres",             # file | postgres
         "file_retention_days": 30,       # how long to keep daily heartbeat files
         "batch_size": 200,               # max items per flush
         "flush_interval_sec": 5,         # flush cadence
@@ -1222,7 +1230,7 @@ class MonitorApp:
         port = port or 5050
         Alerts.log(f"Starting HTTP server on {host}:{port}")
 
-        @app.get('/status')
+        @app.route('/status', methods=['GET'])
         def status():
             wellness = compute_wellness(cfg=self.cfg)
             # geo for country-sensitive CO2 and battery state for power profile
@@ -1270,13 +1278,13 @@ class MonitorApp:
                 "geo": geo,
             })
 
-        @app.get('/latest.jpg')
+        @app.route('/latest.jpg', methods=['GET'])
         def latest():
             if os.path.exists(LATEST_JPG):
                 return send_file(LATEST_JPG, mimetype='image/jpeg', max_age=0)
             return Response(status=404)
 
-        @app.get('/heartbeat')
+        @app.route('/heartbeat', methods=['GET'])
         def heartbeat():
             # Return last N records as JSON array
             N = int((request.args.get('n') if request else None) or 100)
@@ -1449,7 +1457,7 @@ class MonitorApp:
             except Exception as e:
                 return jsonify({"ok": False, "error": str(e)}), 500
 
-        @app.get('/session/state')
+        @app.route('/session/state', methods=['GET'])
         def api_session_state():
             try:
                 st = self._work_session or {}
@@ -1465,7 +1473,7 @@ class MonitorApp:
             except Exception as e:
                 return jsonify({"ok": False, "error": str(e)}), 500
 
-        @app.get('/session/summary')
+        @app.route('/session/summary', methods=['GET'])
         def api_session_summary():
             try:
                 days = int((request.args.get('days') if request else None) or 7)
@@ -1522,7 +1530,7 @@ class MonitorApp:
             except Exception as e:
                 return jsonify({"ok": False, "error": str(e)}), 500
 
-        @app.get('/esg')
+        @app.route('/esg', methods=['GET'])
         def esg_api():
             try:
                 # support month=YYYY-MM to return a rotated monthly file
@@ -1543,7 +1551,7 @@ class MonitorApp:
                 Alerts.log(f"/esg error: {e}")
                 return jsonify({})
 
-        @app.get('/itsm/tickets')
+        @app.route('/itsm/tickets', methods=['GET'])
         def itsm_tickets():
             try:
                 with open(ITSM_TICKETS_JSON, 'r', encoding='utf-8') as f:
@@ -1563,7 +1571,7 @@ class MonitorApp:
                 Alerts.log(f"/geo/refresh error: {e}")
                 return jsonify({"ok": False}), 500
 
-        @app.get('/api/screenshots')
+        @app.route('/api/screenshots', methods=['GET'])
         def api_screenshots():
             """Get list of available screenshots with URLs"""
             try:
@@ -1600,7 +1608,7 @@ class MonitorApp:
                 Alerts.log(f"/api/screenshots error: {e}")
                 return jsonify({"success": False, "error": str(e)}), 500
 
-        @app.get('/screenshots/<filename>')
+        @app.route('/screenshots/<filename>', methods=['GET'])
         def get_screenshot(filename):
             """Serve individual screenshot files"""
             try:

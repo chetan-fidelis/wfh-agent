@@ -1066,7 +1066,10 @@ function setupAutoUpdater() {
       // Don't show error notifications for common issues in development/testing
       if (err && err.message) {
         const errorMsg = err.message.toLowerCase();
-        if (!errorMsg.includes('squirrel') && !errorMsg.includes('no published versions')) {
+        if (!errorMsg.includes('squirrel') &&
+            !errorMsg.includes('no published versions') &&
+            !errorMsg.includes('404') &&
+            !errorMsg.includes('releases.atom')) {
           notify('Update error', err.message);
         }
       }
