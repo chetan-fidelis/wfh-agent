@@ -9,10 +9,10 @@
   "users": [
     "Chetan"
   ],
-  "boot_time": "2025-09-27T21:29:45.850549",
+  "boot_time": "2025-09-27T21:29:45.660631",
   "battery": {
-    "percent": 63,
-    "power_plugged": true,
-    "secsleft": -2
+    "percent": 73,
+    "power_plugged": false,
+    "secsleft": 4451
   }
 }

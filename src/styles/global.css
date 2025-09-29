@@ -978,16 +978,62 @@ body::-webkit-scrollbar-thumb
   gap: 8px;
 }
 
-.chip {
+.net-badge, .chip {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   padding: 4px 8px;
-  border-radius: 999px;
-  border: 1px solid #e5e7eb;
+  border-radius: 4px;
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
+
+.net-badge.office {
+  background: #ecfdf5;
+  color: #065f46;
+  border-color: #a7f3d0;
+}
+
+.net-badge.remote {
+  background: #fee2e2;
+  color: #991b1b;
+  border-color: #fecaca;
+}
+
+/* ===== TOASTS ===== */
+.toast-host {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 9999;
+  pointer-events: none;
+}
+
+.toast {
+  min-width: 240px;
+  max-width: 360px;
+  background: #111827;
+  color: #fff;
+  padding: 10px 12px;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.2);
+  font-size: 13px;
+  pointer-events: auto;
+  opacity: 0.95;
+  animation: slideUp 0.2s ease-out;
+}
+
+.toast.success { background: #065f46; }
+.toast.error { background: #991b1b; }
+.toast.info { background: #1f2937; }
+
+.toast .title { font-weight: 600; margin-bottom: 2px; }
+.toast .msg { opacity: 0.9; }
 .chip-offline { background: #fee2e2; color: #991b1b; border-color: #fecaca; }
 .chip-online { background: #ecfdf5; color: #065f46; border-color: #a7f3d0; }
 

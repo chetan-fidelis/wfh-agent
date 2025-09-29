@@ -29,5 +29,7 @@ contextBridge.exposeInMainWorld('api', {
   workBreakToggle: () => ipcRenderer.invoke('work:breakToggle'),
   workEnd: () => ipcRenderer.invoke('work:end'),
   workState: () => ipcRenderer.invoke('work:state'),
-  workSummary: (days) => ipcRenderer.invoke('work:summary', { days })
+  workSummary: (days) => ipcRenderer.invoke('work:summary', { days }),
+  // App info
+  appVersion: () => ipcRenderer.invoke('app:version')
 });

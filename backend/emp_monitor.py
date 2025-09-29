@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import json
+import copy
 import threading
 import queue
 import shutil
@@ -110,7 +111,7 @@ DEFAULT_CONFIG = {
     "work_hours": {"start": "09:30", "end": "18:30"},
     "blocked_domains": [
         # Add domains to block during work hours
-        # "facebook.com", "youtube.com"
+        "facebook.com", "instagram.com", "twitter.com"
     ],
     "productivity_tags": {
         # process_name(lower): productive|unproductive|neutral
@@ -221,7 +222,6 @@ DEFAULT_CONFIG = {
             "active_burst_cpu_percent": 50
         },
         "db": {
-            "url": "postgresql://postgres:zRJUvU28F2OZ@20.197.8.101:5432/employee_monitor", # optional direct connection string; prefer this if set
             "url_env": "EMP_DB_URL",    # environment var holding connection string
             "schema": "employee_monitor"
         }
@@ -1266,6 +1266,18 @@ class MonitorApp:
             except Exception:
                 battery = None
             geo = self.get_geo_info()
+            # Redact sensitive config fields before exposing in /status
+            try:
+                cfg_copy = copy.deepcopy(self.cfg.data)
+                ing = cfg_copy.get('ingestion') or {}
+                db = ing.get('db') or {}
+                if isinstance(db, dict):
+                    db['url'] = ''
+                    db['url_env'] = ''
+                    ing['db'] = db
+                cfg_copy['ingestion'] = ing
+            except Exception:
+                cfg_copy = {"error": "config_unavailable"}
             return jsonify({
                 "current": cur,
                 "activity": asdict(self.activity),
@@ -1273,7 +1285,7 @@ class MonitorApp:
                 "website_usage": web_usage,
                 "website_usage_by_tag": web_usage_by_tag,
                 "wellness": wellness,
-                "config": self.cfg.data,
+                "config": cfg_copy,
                 "battery": battery,
                 "geo": geo,
             })
@@ -1356,37 +1368,43 @@ class MonitorApp:
                     _save_file_session(rec)
                     return
                 schema = db_cfg.get('schema', 'employee_monitor')
-                with psycopg.connect(dsn) as conn:
-                    with conn.cursor() as cur:
-                        cur.execute(f"""
-                            CREATE TABLE IF NOT EXISTS {schema}.work_sessions (
-                                emp_id INTEGER NOT NULL,
-                                start_ts TIMESTAMPTZ NOT NULL,
-                                end_ts TIMESTAMPTZ,
-                                breaks JSONB,
-                                work_ms BIGINT,
-                                break_ms BIGINT,
-                                total_ms BIGINT,
-                                PRIMARY KEY (emp_id, start_ts)
-                            );
-                        """)
-                        cur.execute(f"SET search_path TO {schema}, public;")
-                        cur.execute(f"""
-                            INSERT INTO {schema}.work_sessions(emp_id,start_ts,end_ts,breaks,work_ms,break_ms,total_ms)
-                            VALUES (%s,%s,%s,%s,%s,%s,%s)
-                            ON CONFLICT (emp_id, start_ts) DO UPDATE SET
-                                end_ts = EXCLUDED.end_ts,
-                                breaks = EXCLUDED.breaks,
-                                work_ms = EXCLUDED.work_ms,
-                                break_ms = EXCLUDED.break_ms,
-                                total_ms = EXCLUDED.total_ms;
-                        """, (
-                            int(self.cfg.data.get('emp_id', 0)),
-                            rec.get('start_ts'), rec.get('end_ts'), json.dumps(rec.get('breaks') or []),
-                            int(rec.get('work_ms') or 0), int(rec.get('break_ms') or 0), int(rec.get('total_ms') or 0)
-                        ))
+                try:
+                    Alerts.log(f"Attempting PostgreSQL connection to: {dsn[:30]}...")
+                    with psycopg.connect(dsn) as conn:
+                        with conn.cursor() as cur:
+                            cur.execute(f"""
+                                CREATE TABLE IF NOT EXISTS {schema}.work_sessions (
+                                    emp_id INTEGER NOT NULL,
+                                    start_ts TIMESTAMPTZ NOT NULL,
+                                    end_ts TIMESTAMPTZ,
+                                    breaks JSONB,
+                                    work_ms BIGINT,
+                                    break_ms BIGINT,
+                                    total_ms BIGINT,
+                                    PRIMARY KEY (emp_id, start_ts)
+                                );
+                            """)
+                            cur.execute(f"SET search_path TO {schema}, public;")
+                            cur.execute(f"""
+                                INSERT INTO {schema}.work_sessions(emp_id,start_ts,end_ts,breaks,work_ms,break_ms,total_ms)
+                                VALUES (%s,%s,%s,%s,%s,%s,%s)
+                                ON CONFLICT (emp_id, start_ts) DO UPDATE SET
+                                    end_ts = EXCLUDED.end_ts,
+                                    breaks = EXCLUDED.breaks,
+                                    work_ms = EXCLUDED.work_ms,
+                                    break_ms = EXCLUDED.break_ms,
+                                    total_ms = EXCLUDED.total_ms;
+                            """, (
+                                int(self.cfg.data.get('emp_id', 0)),
+                                rec.get('start_ts'), rec.get('end_ts'), json.dumps(rec.get('breaks') or []),
+                                int(rec.get('work_ms') or 0), int(rec.get('break_ms') or 0), int(rec.get('total_ms') or 0)
+                            ))
+                            Alerts.log(f"PostgreSQL session saved successfully for emp_id {self.cfg.data.get('emp_id', 0)}")
+                except Exception as e:
+                    Alerts.log(f"work session db insert error: {e}")
+                    _save_file_session(rec)
             except Exception as e:
-                Alerts.log(f"work session db insert error: {e}")
+                Alerts.log(f"Session insert function error: {e}")
                 _save_file_session(rec)
 
         @app.post('/session/start')
@@ -1884,6 +1902,7 @@ class IngestionBuffer:
                         ))
                     if rows:
                         try:
+                            Alerts.log(f"Heartbeat: attempting PostgreSQL batch insert of {len(rows)} records")
                             with psycopg.connect(dsn) as conn:
                                 with conn.cursor() as cur:
                                     # Ensure schema is in search_path for the session
@@ -1906,6 +1925,7 @@ class IngestionBuffer:
                                         ON CONFLICT (emp_id, ts) DO NOTHING
                                         """
                                         cur.executemany(sql, rows)
+                                    Alerts.log(f"Heartbeat: PostgreSQL batch insert successful ({len(rows)} records)")
                         except Exception as e:
                             Alerts.log(f"Postgres ingestion error: {e}")
         else:

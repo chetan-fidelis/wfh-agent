@@ -28,6 +28,8 @@
   const bannerClose = document.getElementById('bannerClose');
   const offlineChip = document.getElementById('offlineChip');
   const footerClock = document.getElementById('footerClock');
+  const footerVer = document.getElementById('footerVer');
+  let toastHost = document.getElementById('toastHost');
 
   function msToHuman(ms) {
     const s = Math.floor(ms / 1000);
@@ -49,6 +51,7 @@
       bannerText.textContent = ok ? 'Work started automatically.' : 'Tried to auto-start work, but backend was unreachable.';
       banner.style.display = 'flex';
       setTimeout(() => { if (banner && banner.style.display !== 'none') banner.style.display = 'none'; }, 6000);
+      showToast({ title: ok ? 'Sync Successful' : 'Sync Failed', msg: ok ? 'Auto-start synced with server.' : 'Auto-start queued; will retry when online.', type: ok ? 'success' : 'error' });
       refreshState();
     });
   }
@@ -59,6 +62,39 @@
   }
   tickClock();
   setInterval(tickClock, 1000);
+
+  // Toasts
+  function showToast({ title = '', msg = '', type = 'info', timeout = 4000 } = {}) {
+    if (!toastHost) {
+      // Create host dynamically if missing (script may load before element)
+      toastHost = document.createElement('div');
+      toastHost.id = 'toastHost';
+      toastHost.className = 'toast-host';
+      document.body.appendChild(toastHost);
+    }
+    const el = document.createElement('div');
+    el.className = `toast ${type}`;
+    el.innerHTML = `${title ? `<div class="title">${title}</div>` : ''}${msg ? `<div class="msg">${msg}</div>` : ''}`;
+    toastHost.appendChild(el);
+    const t = setTimeout(() => {
+      try { el.remove(); } catch (_) {}
+      clearTimeout(t);
+    }, Math.max(1500, timeout|0));
+  }
+
+  // Footer version
+  async function setVersion() {
+    try {
+      // Dont Show Electron version
+      const v = await (window.api && window.api.appVersion ? window.api.appVersion() : null);
+      if (v && v.ok && footerVer) {
+        const parts = [];
+        if (v.app) parts.push(`v${v.app}`);
+        footerVer.textContent = parts.join(' • ');
+      }
+    } catch (_) {}
+  }
+  setVersion();
 
   // Connectivity check and offline chip
   async function checkConnectivity() {
@@ -142,7 +178,18 @@
       kpiAvg.textContent = msToHuman(k.avg_work_ms || 0);
       kpiSessions.textContent = (k.sessions_completed || 0).toString();
 
-      pagination.allRows = res.data.rows || [];
+      // Show newest first (descending by start_ts) and remove pagination navigation
+      const rows = (res.data.rows || []).slice().sort((a, b) => {
+        const ad = new Date(a.start_ts || a.start || 0).getTime();
+        const bd = new Date(b.start_ts || b.start || 0).getTime();
+        return bd - ad; // newest first
+      });
+      pagination.allRows = rows;
+      // Show all rows on a single page and hide controls
+      pagination.pageSize = rows.length || 1000;
+      pagination.pageIndex = 0;
+      const pagEl = document.querySelector('.table-pagination');
+      if (pagEl) pagEl.style.display = 'none';
       renderSessionsPage();
     }
   }
@@ -294,6 +341,9 @@
         banner.style.display = 'flex';
         setTimeout(() => { if (banner && banner.style.display !== 'none') banner.style.display = 'none'; }, 6000);
       }
+      showToast({ title: 'Sync Queued', msg: 'Start will sync when online.', type: 'info' });
+    } else {
+      showToast({ title: 'Sync Successful', msg: 'Work start synced with server.', type: 'success' });
     }
     await refreshState();
     await refreshSummary();
@@ -306,7 +356,12 @@
       const state = st.data.state.status || 'idle';
       const path = state === 'break' ? '/session/break/end' : '/session/break/start';
       const r = await window.api.post(path, {}, cfg.serverUrl);
-      if (!r.ok) console.error('break toggle error', r.error);
+      if (!r.ok) {
+        console.error('break toggle error', r.error);
+        showToast({ title: 'Sync Queued', msg: 'Break toggle will sync when online.', type: 'info' });
+      } else {
+        showToast({ title: 'Sync Successful', msg: 'Break toggle synced with server.', type: 'success' });
+      }
       await refreshState();
       await refreshSummary();
     }
@@ -315,7 +370,12 @@
   endBtn.addEventListener('click', async () => {
     const cfg = await window.api.getConfig();
     const r = await window.api.post('/session/end', {}, cfg.serverUrl);
-    if (!r.ok) console.error('end error', r.error);
+    if (!r.ok) {
+      console.error('end error', r.error);
+      showToast({ title: 'Sync Queued', msg: 'End session will sync when online.', type: 'info' });
+    } else {
+      showToast({ title: 'Sync Successful', msg: 'Work end synced with server.', type: 'success' });
+    }
     await refreshState();
     await refreshSummary();
   });

@@ -293,6 +293,21 @@ ipcMain.handle('api:post', async (_evt, { path: apiPath, baseUrl, body }) => {
   }
 });
 
+// App/version info for footer
+ipcMain.handle('app:version', async () => {
+  try {
+    return {
+      ok: true,
+      app: app.getVersion ? app.getVersion() : null,
+      electron: (process && process.versions && process.versions.electron) || null,
+      node: (process && process.versions && process.versions.node) || null,
+      chrome: (process && process.versions && process.versions.chrome) || null
+    };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
 // ---------------- Work Session Engine (local prototype) ----------------
 function nowIso() { return new Date().toISOString(); }
 function loadWork() {
