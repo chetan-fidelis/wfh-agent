@@ -132,6 +132,7 @@ function createTray() {
         { label: 'Check for Updates…', enabled: app.isPackaged && !updateState.checking, click: () => checkForUpdates() },
         { label: updateState.available && !updateState.downloaded ? 'Download Update' : 'Download Update', enabled: app.isPackaged && updateState.available && !updateState.downloaded, click: () => downloadUpdate() },
         { label: 'Install and Restart', enabled: app.isPackaged && updateState.downloaded, click: () => installAndRestart() },
+        { label: updateState.autoInstall ? '✓ Auto-Install Updates' : 'Auto-Install Updates', enabled: app.isPackaged, click: () => toggleAutoInstall() },
         { type: 'separator' },
         { label: 'Reset App Data', click: () => { try { fs.unlinkSync(userDataPath('session.json')); notify('App data reset', 'Session cleared.'); } catch (e) { notify('Reset failed', e.message || 'Unable to clear session'); } } },
         { type: 'separator' },
@@ -428,7 +429,11 @@ let updateState = {
   downloaded: false,
   version: null,
   progress: null,
+  autoInstall: true, // Auto-install updates by default
 };
+
+// Auto-update intervals
+let updateCheckInterval = null;
 
 async function waitForBackend(url, timeoutMs = 60000) {
   const start = Date.now();
@@ -744,38 +749,37 @@ app.whenReady().then(async () => {
   startAlertsWatcher();
   // Start periodic drain of offline queue
   setInterval(drainQueue, 30000);
-  // Power/session state integration: auto break/resume
+  // Power/session state integration: auto break/resume (only for real system events)
   try {
+    // Only monitor actual system suspend/resume - not session switching
     powerMonitor.on('suspend', () => {
-      console.log('[power] suspend -> break start');
+      console.log('[power] System suspend detected -> break start');
       backendPost('/session/break/start', {});
       broadcast('power:break', { action: 'start', source: 'suspend' });
     });
-    powerMonitor.on('lock-screen', () => {
-      console.log('[power] lock-screen -> break start');
-      backendPost('/session/break/start', {});
-      broadcast('power:break', { action: 'start', source: 'lock-screen' });
-    });
-    powerMonitor.on('shutdown', (e) => {
-      console.log('[power] shutdown -> break start');
-      backendPost('/session/break/start', {});
-      broadcast('power:break', { action: 'start', source: 'shutdown' });
-    });
-    powerMonitor.on('session-end', () => {
-      console.log('[power] session-end -> break start');
-      backendPost('/session/break/start', {});
-      broadcast('power:break', { action: 'start', source: 'session-end' });
-    });
+
     powerMonitor.on('resume', () => {
-      console.log('[power] resume -> break end');
+      console.log('[power] System resume detected -> break end');
       backendPost('/session/break/end', {});
       broadcast('power:break', { action: 'end', source: 'resume' });
     });
+
+    // Only monitor actual screen lock/unlock - not window focus changes
+    powerMonitor.on('lock-screen', () => {
+      console.log('[power] Screen lock detected -> break start');
+      backendPost('/session/break/start', {});
+      broadcast('power:break', { action: 'start', source: 'lock-screen' });
+    });
+
     powerMonitor.on('unlock-screen', () => {
-      console.log('[power] unlock-screen -> break end');
+      console.log('[power] Screen unlock detected -> break end');
       backendPost('/session/break/end', {});
       broadcast('power:break', { action: 'end', source: 'unlock-screen' });
     });
+
+    // REMOVED: shutdown and session-end events as they trigger false positives
+    // These events fire during normal window switching and application focus changes
+
   } catch (e) {
     console.warn('powerMonitor hook failed:', e.message);
   }
@@ -827,6 +831,10 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
+
+  // Stop update checking
+  stopPeriodicUpdateChecks();
+
   try {
     if (backendProc && !backendProc.killed) {
       if (process.platform === 'win32') {
@@ -1040,12 +1048,19 @@ function setupAutoUpdater() {
     });
     autoUpdater.on('update-available', (info) => {
       updateState.checking = false; updateState.available = true; updateState.version = info && info.version;
-      notify('Update available', `Version ${updateState.version || ''} is available. Open tray to download.`);
+      console.log(`[auto-updater] Update available: ${updateState.version}`);
+      notify('Update available', `Version ${updateState.version || ''} is downloading in background...`);
       if (tray && tray._rebuildMenu) tray._rebuildMenu();
+      // Automatically start download
+      try {
+        autoUpdater.downloadUpdate();
+      } catch (e) {
+        console.warn('Auto-download failed:', e.message);
+      }
     });
     autoUpdater.on('update-not-available', () => {
       updateState.checking = false; updateState.available = false; updateState.downloaded = false;
-      notify('No updates', 'You are on the latest version.');
+      console.log('[auto-updater] No updates available');
       if (tray && tray._rebuildMenu) tray._rebuildMenu();
     });
     autoUpdater.on('error', (err) => {
@@ -1056,20 +1071,69 @@ function setupAutoUpdater() {
     });
     autoUpdater.on('download-progress', (p) => {
       updateState.progress = p;
+      console.log(`[auto-updater] Download progress: ${Math.round(p.percent)}%`);
     });
     autoUpdater.on('update-downloaded', (info) => {
       updateState.downloaded = true; updateState.available = true; updateState.checking = false;
-      notify('Update ready', 'Install and restart to apply the update.');
+      console.log(`[auto-updater] Update downloaded: ${updateState.version}`);
+
+      if (updateState.autoInstall) {
+        // Auto-install after a short delay
+        notify('Update installing', 'Automatically installing update and restarting...');
+        setTimeout(() => {
+          try {
+            autoUpdater.quitAndInstall();
+          } catch (e) {
+            console.warn('Auto-install failed:', e.message);
+            notify('Update ready', 'Please restart manually to apply the update.');
+          }
+        }, 3000); // 3 second delay
+      } else {
+        notify('Update ready', 'Restart to apply the update.');
+      }
       if (tray && tray._rebuildMenu) tray._rebuildMenu();
     });
+    // Start periodic update checks (every 4 hours)
+    startPeriodicUpdateChecks();
   } catch (e) {
     console.warn('Failed to setup autoUpdater:', e.message);
   }
 }
 
-function checkForUpdates() {
-  if (!app.isPackaged) { notify('Updater disabled', 'Updates only work in packaged builds.'); return; }
-  try { autoUpdater.checkForUpdates(); } catch (e) { console.warn('checkForUpdates failed:', e.message); }
+function startPeriodicUpdateChecks() {
+  if (!app.isPackaged) return;
+
+  // Check for updates every 4 hours (14400000 ms)
+  updateCheckInterval = setInterval(() => {
+    console.log('[auto-updater] Periodic update check...');
+    checkForUpdates(true); // Silent check
+  }, 4 * 60 * 60 * 1000);
+
+  // Initial check after 30 seconds (startup delay)
+  setTimeout(() => {
+    console.log('[auto-updater] Initial startup update check...');
+    checkForUpdates(true); // Silent check
+  }, 30000);
+}
+
+function stopPeriodicUpdateChecks() {
+  if (updateCheckInterval) {
+    clearInterval(updateCheckInterval);
+    updateCheckInterval = null;
+  }
+}
+
+function checkForUpdates(silent = false) {
+  if (!app.isPackaged) {
+    if (!silent) notify('Updater disabled', 'Updates only work in packaged builds.');
+    return;
+  }
+  try {
+    if (!silent) console.log('[auto-updater] Checking for updates...');
+    autoUpdater.checkForUpdates();
+  } catch (e) {
+    console.warn('checkForUpdates failed:', e.message);
+  }
 }
 function downloadUpdate() {
   if (!app.isPackaged) return;
@@ -1078,6 +1142,13 @@ function downloadUpdate() {
 function installAndRestart() {
   if (!app.isPackaged) return;
   try { autoUpdater.quitAndInstall(); } catch (e) { console.warn('quitAndInstall failed:', e.message); }
+}
+
+function toggleAutoInstall() {
+  updateState.autoInstall = !updateState.autoInstall;
+  console.log(`[auto-updater] Auto-install ${updateState.autoInstall ? 'enabled' : 'disabled'}`);
+  notify('Auto-Install', `Automatic update installation ${updateState.autoInstall ? 'enabled' : 'disabled'}.`);
+  if (tray && tray._rebuildMenu) tray._rebuildMenu();
 }
 
 // Network status for UI (Office vs Remote)
