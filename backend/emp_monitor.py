@@ -15,6 +15,10 @@ import locale
 # Third-party deps
 from flask import Flask, send_file, jsonify, Response, request
 import psutil
+try:
+    from waitress import serve
+except Exception:
+    serve = None
 from PIL import Image
 import mss
 from pynput import keyboard, mouse
@@ -431,11 +435,59 @@ class ScheduledShooter(threading.Thread):
                     shutil.copyfile(out_path, LATEST_JPG)
                 except Exception:
                     pass
+
+                # Upload screenshot to server if configured
+                self._upload_screenshot(out_path, ts)
+
                 Alerts.log(f"Scheduled shot captured: {out_path}")
                 return True
         except Exception as e:
             Alerts.log(f"Scheduled shot error: {e}")
         return False
+
+    def _upload_screenshot(self, file_path: str, timestamp: str):
+        """Upload screenshot to server if configured"""
+        try:
+            upload_cfg = self.app.cfg.data.get('screenshot_upload', {})
+            if not upload_cfg.get('enabled', False):
+                return
+
+            server_url = upload_cfg.get('server_url', '').strip()
+            if not server_url:
+                return
+
+            emp_id = int(self.app.cfg.data.get('emp_id', 0))
+            if not emp_id:
+                return
+
+            # Prepare upload data
+            with open(file_path, 'rb') as f:
+                files = {'screenshot': (f'shot_{timestamp}.jpg', f, 'image/jpeg')}
+                data = {
+                    'emp_id': emp_id,
+                    'timestamp': timestamp,
+                    'captured_at': dt.datetime.now().isoformat()
+                }
+
+                # Upload with timeout
+                upload_url = f"{server_url.rstrip('/')}/api/upload/screenshot"
+                response = requests.post(upload_url, files=files, data=data, timeout=30)
+
+                if response.status_code == 200:
+                    result = response.json()
+                    if result.get('success'):
+                        Alerts.log(f"Screenshot uploaded successfully: {result.get('url', 'N/A')}")
+                    else:
+                        Alerts.log(f"Screenshot upload failed: {result.get('error', 'Unknown error')}")
+                else:
+                    Alerts.log(f"Screenshot upload failed: HTTP {response.status_code}")
+
+        except requests.exceptions.Timeout:
+            Alerts.log("Screenshot upload timed out")
+        except requests.exceptions.RequestException as e:
+            Alerts.log(f"Screenshot upload network error: {e}")
+        except Exception as e:
+            Alerts.log(f"Screenshot upload error: {e}")
 
     def run(self):
         current_day = None
@@ -1511,6 +1563,60 @@ class MonitorApp:
                 Alerts.log(f"/geo/refresh error: {e}")
                 return jsonify({"ok": False}), 500
 
+        @app.get('/api/screenshots')
+        def api_screenshots():
+            """Get list of available screenshots with URLs"""
+            try:
+                screenshots = []
+                if os.path.exists(SHOTS_DIR):
+                    for filename in os.listdir(SHOTS_DIR):
+                        if filename.endswith('.jpg') and filename.startswith('shot_'):
+                            filepath = os.path.join(SHOTS_DIR, filename)
+                            try:
+                                # Extract timestamp from filename (shot_YYYYMMDD_HHMMSS.jpg)
+                                timestamp_str = filename.replace('shot_', '').replace('.jpg', '')
+                                timestamp = dt.datetime.strptime(timestamp_str, '%Y%m%d_%H%M%S')
+
+                                stat = os.stat(filepath)
+                                screenshots.append({
+                                    'filename': filename,
+                                    'timestamp': timestamp.isoformat(),
+                                    'url': f'/screenshots/{filename}',
+                                    'size': stat.st_size,
+                                    'captured_at': timestamp.strftime('%Y-%m-%d %H:%M:%S')
+                                })
+                            except Exception as e:
+                                Alerts.log(f"Error processing screenshot {filename}: {e}")
+
+                # Sort by timestamp (newest first)
+                screenshots.sort(key=lambda x: x['timestamp'], reverse=True)
+
+                return jsonify({
+                    'success': True,
+                    'screenshots': screenshots,
+                    'count': len(screenshots)
+                })
+            except Exception as e:
+                Alerts.log(f"/api/screenshots error: {e}")
+                return jsonify({"success": False, "error": str(e)}), 500
+
+        @app.get('/screenshots/<filename>')
+        def get_screenshot(filename):
+            """Serve individual screenshot files"""
+            try:
+                # Security: only allow jpg files with shot_ prefix
+                if not filename.endswith('.jpg') or not filename.startswith('shot_'):
+                    return jsonify({"error": "Invalid filename"}), 400
+
+                filepath = os.path.join(SHOTS_DIR, filename)
+                if not os.path.exists(filepath):
+                    return jsonify({"error": "Screenshot not found"}), 404
+
+                return send_file(filepath, mimetype='image/jpeg')
+            except Exception as e:
+                Alerts.log(f"/screenshots/{filename} error: {e}")
+                return jsonify({"error": str(e)}), 500
+
         @app.get('/')
         def home():
             return Response(
@@ -1549,7 +1655,16 @@ class MonitorApp:
 
         def run_server():
             try:
-                app.run(host=host or '127.0.0.1', port=port or 5050, debug=False, use_reloader=False, threaded=True)
+                server_host = host or '127.0.0.1'
+                server_port = port or 5050
+                if serve:
+                    # Use waitress production WSGI server
+                    Alerts.log(f"Starting production WSGI server on {server_host}:{server_port}")
+                    serve(app, host=server_host, port=server_port, threads=6)
+                else:
+                    # Fallback to Flask dev server
+                    Alerts.log(f"Waitress not available, using Flask dev server on {server_host}:{server_port}")
+                    app.run(host=server_host, port=server_port, debug=False, use_reloader=False, threaded=True)
             except OSError as e:
                 Alerts.log(f"HTTP server failed to start on {host}:{port}: {e}. Try a different --port (e.g., 5050) or check firewall/permissions.")
 

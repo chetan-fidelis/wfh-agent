@@ -1,4 +1,5 @@
-const { app, BrowserWindow, ipcMain, nativeTheme, Notification, powerMonitor, Tray, Menu, autoUpdater } = require('electron');
+const { app, BrowserWindow, ipcMain, nativeTheme, Notification, powerMonitor, Tray, Menu } = require('electron');
+const { autoUpdater } = require('electron-updater');
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -128,13 +129,6 @@ function createTray() {
     const buildMenu = () => {
       const items = [
         { label: 'Show Dashboard', click: showDashboard },
-        { type: 'separator' },
-        { label: 'Check for Updates…', enabled: app.isPackaged && !updateState.checking, click: () => checkForUpdates() },
-        { label: updateState.available && !updateState.downloaded ? 'Download Update' : 'Download Update', enabled: app.isPackaged && updateState.available && !updateState.downloaded, click: () => downloadUpdate() },
-        { label: 'Install and Restart', enabled: app.isPackaged && updateState.downloaded, click: () => installAndRestart() },
-        { label: updateState.autoInstall ? '✓ Auto-Install Updates' : 'Auto-Install Updates', enabled: app.isPackaged, click: () => toggleAutoInstall() },
-        { type: 'separator' },
-        { label: 'Reset App Data', click: () => { try { fs.unlinkSync(userDataPath('session.json')); notify('App data reset', 'Session cleared.'); } catch (e) { notify('Reset failed', e.message || 'Unable to clear session'); } } },
         { type: 'separator' },
         { label: 'Quit', click: () => { isQuitting = true; app.quit(); } }
       ];
@@ -1034,13 +1028,15 @@ function notify(title, body) {
 function setupAutoUpdater() {
   if (!app.isPackaged) return; // only in packaged builds
   try {
-    const pkg = require(path.join(__dirname, 'package.json'));
-    const repo = 'chetan-fidelis/wfh-agent';
-    // Using update.electronjs.org for GitHub provider
-    // See: https://www.electronjs.org/docs/latest/tutorial/updates
-    const feedURL = `https://update.electronjs.org/${repo}/${process.platform}-${process.arch}/${pkg.version}`;
-    // setFeedURL is required on win32/darwin for core autoUpdater
-    autoUpdater.setFeedURL({ url: feedURL });
+    // Configure electron-updater for GitHub releases
+    autoUpdater.logger = {
+      info: (msg) => console.log(`[auto-updater] ${msg}`),
+      warn: (msg) => console.warn(`[auto-updater] ${msg}`),
+      error: (msg) => console.error(`[auto-updater] ${msg}`)
+    };
+
+    // electron-updater automatically detects GitHub releases from package.json repository field
+    autoUpdater.checkForUpdatesAndNotify = false; // We'll handle notifications manually
 
     autoUpdater.on('checking-for-update', () => {
       updateState.checking = true; updateState.available = false; updateState.downloaded = false; updateState.progress = null;
@@ -1066,7 +1062,15 @@ function setupAutoUpdater() {
     autoUpdater.on('error', (err) => {
       updateState.checking = false;
       console.warn('autoUpdater error:', err && err.message || err);
-      notify('Update error', (err && err.message) || 'Unknown error');
+
+      // Don't show error notifications for common issues in development/testing
+      if (err && err.message) {
+        const errorMsg = err.message.toLowerCase();
+        if (!errorMsg.includes('squirrel') && !errorMsg.includes('no published versions')) {
+          notify('Update error', err.message);
+        }
+      }
+
       if (tray && tray._rebuildMenu) tray._rebuildMenu();
     });
     autoUpdater.on('download-progress', (p) => {
@@ -1130,7 +1134,12 @@ function checkForUpdates(silent = false) {
   }
   try {
     if (!silent) console.log('[auto-updater] Checking for updates...');
-    autoUpdater.checkForUpdates();
+    autoUpdater.checkForUpdates().catch(err => {
+      console.warn('checkForUpdates failed:', err.message);
+      if (!silent && !err.message.toLowerCase().includes('squirrel')) {
+        notify('Update check failed', 'Unable to check for updates. Please try again later.');
+      }
+    });
   } catch (e) {
     console.warn('checkForUpdates failed:', e.message);
   }

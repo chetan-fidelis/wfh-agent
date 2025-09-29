@@ -1,22 +1,17 @@
 {
+  "code.exe": {
+    "productive": 0.0022935867309570312,
+    "unproductive": 0.0,
+    "neutral": 0.0
+  },
   "electron.exe": {
     "productive": 0.0,
     "unproductive": 0.0,
-    "neutral": 21.5072181224823
-  },
-  "code.exe": {
-    "productive": 8.338369369506836,
-    "unproductive": 0.0,
-    "neutral": 0.0
+    "neutral": 10.053162813186646
   },
   "explorer.exe": {
     "productive": 0.0,
     "unproductive": 0.0,
-    "neutral": 2.0028202533721924
-  },
-  "windsurf.exe": {
-    "productive": 0.0,
-    "unproductive": 0.0,
-    "neutral": 151.6474370956421
+    "neutral": 2.004110336303711
   }
 }
