@@ -77,12 +77,12 @@
     "webhook_url": "",
     "email": {
       "enabled": true,
-      "smtp_server": "smtp.office365.com",
+      "smtp_server": "",
       "smtp_port": 587,
       "from_email": "nexohr@fidelisgroup.in",
-      "to_emails": ["chetan.n@fidelisgroup.in"],
+      "to_emails": [""],
       "username": "nexohr@fidelisgroup.in",
-      "password": "B@994498986594oh"
+      "password": ""
     },
     "events": {
       "app_quit": true,
