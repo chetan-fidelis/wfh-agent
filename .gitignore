@@ -1,3 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+*.bak
+.venv/
+venv/
+ENV/
+
+# PyInstaller
+backend/build/
+backend/dist/
+*.spec
+
 # Logs
 logs
 *.log
@@ -9,7 +27,14 @@ pnpm-debug.log*
 # Dependency directories
 node_modules/
 jspm_packages/
-monitor_data/
+
+# Monitor data (keep structure, ignore content)
+monitor_data/*.json
+monitor_data/*.db
+monitor_data/shots/*.jpg
+monitor_data/esg/*.json
+monitor_data/netlogs/*.json
+!monitor_data/config.json.template
 
 # Build output
 dist/
@@ -28,6 +53,9 @@ electron-builder.yml
 # System files
 .DS_Store
 Thumbs.db
+nul
+*.tmp
+*.temp
 
 # Env
 .env
@@ -37,3 +65,8 @@ Thumbs.db
 # VSCode
 .vscode/*
 !.vscode/extensions.json
+
+# IDE
+.idea/
+*.swp
+*.swo

@@ -4,7 +4,13 @@
       "Bash(npm run build:single:*)",
       "Bash(npm start)",
       "Bash(copy backenddistemp_monitor.exe backendemp_monitor.exe)",
-      "Bash(backend/dist/emp_monitor.exe --help)"
+      "Bash(backend/dist/emp_monitor.exe --help)",
+      "Bash(tasklist)",
+      "Bash(findstr:*)",
+      "Bash(python:*)",
+      "Bash(tasklist:*)",
+      "Bash(tasklist.exe)",
+      "Bash(curl:*)"
     ],
     "deny": [],
     "ask": []

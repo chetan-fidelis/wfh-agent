@@ -1,5 +1,11 @@
-const { app, BrowserWindow, ipcMain, nativeTheme, Notification, powerMonitor, Tray, Menu } = require('electron');
-const { autoUpdater } = require('electron-updater');
+const { app, BrowserWindow, ipcMain, nativeTheme, Notification, powerMonitor, Tray, Menu, netLog } = require('electron');
+let autoUpdater;
+try {
+  autoUpdater = require('electron-updater').autoUpdater;
+} catch (e) {
+  console.warn('Auto-updater not available:', e.message);
+  autoUpdater = null;
+}
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -78,6 +84,7 @@ const ASSETS_DIR = path.join(ROOT_DIR, 'assets');
 const MONITOR_CONFIG = path.join(__dirname, 'monitor_data', 'config.json');
 const ALERTS_LOG = path.join(__dirname, 'monitor_data', 'alerts.log');
 const OFFLINE_Q = path.join(__dirname, 'monitor_data', 'offline_queue.json');
+const NETLOG_DIR = path.join(__dirname, 'monitor_data', 'netlogs');
 
 // First-run helpers (top-level)
 function userDataPath(...p) { return path.join(app.getPath('userData'), ...p); }
@@ -94,12 +101,101 @@ function ensureFirstRunCleanup() {
   }
 }
 
+// Format milliseconds to human readable time
+function formatDuration(ms) {
+  if (!ms || ms < 0) return '0m';
+  const hours = Math.floor(ms / 3600000);
+  const minutes = Math.floor((ms % 3600000) / 60000);
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+  return `${minutes}m`;
+}
+
+// Get current work session status from backend
+async function getWorkStatus() {
+  try {
+    // Fetch live session state from backend
+    const cfg = loadConfig();
+    const baseUrl = cfg.serverUrl || 'http://127.0.0.1:5050';
+
+    try {
+      const { data } = await httpGet(`${baseUrl}/session/state`, { timeout: 3000 });
+
+      if (data && data.ok && data.state && data.state.start_ts && !data.state.end_ts) {
+        // Active session from backend
+        const startTime = new Date(data.state.start_ts).getTime();
+        const now = Date.now();
+        const totalMs = now - startTime;
+
+        const breakMs = (data.state.breaks || []).reduce((acc, b) => {
+          if (b.start_ts && b.end_ts) {
+            return acc + (new Date(b.end_ts).getTime() - new Date(b.start_ts).getTime());
+          }
+          return acc;
+        }, 0);
+
+        const workMs = Math.max(0, totalMs - breakMs);
+
+        // Check if on break
+        const breaks = data.state.breaks || [];
+        const onBreak = breaks.length > 0 && !breaks[breaks.length - 1].end_ts;
+
+        return {
+          status: onBreak ? 'break' : 'working',
+          label: onBreak ? '☕ On Break' : '⏱️ Working',
+          duration: workMs,
+          totalDuration: totalMs,
+          breakDuration: breakMs
+        };
+      }
+    } catch (backendErr) {
+      console.warn('[tray] Backend session fetch failed:', backendErr.message);
+    }
+
+    // Fallback to local session if backend unavailable
+    const work = loadWork();
+    if (!work.current || work.current.end_ts) {
+      return { status: 'idle', label: 'Not Working', duration: 0 };
+    }
+
+    const startTime = new Date(work.current.start_ts).getTime();
+    const now = Date.now();
+    const totalMs = now - startTime;
+
+    const breakMs = (work.current.breaks || []).reduce((acc, b) => {
+      if (b.start_ts && b.end_ts) {
+        return acc + (new Date(b.end_ts).getTime() - new Date(b.start_ts).getTime());
+      }
+      return acc;
+    }, 0);
+
+    const workMs = Math.max(0, totalMs - breakMs);
+
+    // Check if on break
+    const breaks = work.current.breaks || [];
+    const onBreak = breaks.length > 0 && !breaks[breaks.length - 1].end_ts;
+
+    return {
+      status: onBreak ? 'break' : 'working',
+      label: onBreak ? '☕ On Break' : '⏱️ Working',
+      duration: workMs,
+      totalDuration: totalMs,
+      breakDuration: breakMs
+    };
+  } catch (e) {
+    console.error('Error getting work status:', e);
+    return { status: 'idle', label: 'Not Working', duration: 0 };
+  }
+}
+
 function createTray() {
   try {
     if (tray) return tray;
     const iconPath = path.join(ASSETS_DIR, 'icon.png');
     tray = new Tray(iconPath);
     tray.setToolTip('WFH Agent');
+
     const showDashboard = () => {
       try {
         if (!dashWin || dashWin.isDestroyed()) {
@@ -126,24 +222,253 @@ function createTray() {
         }
       } catch (_) {}
     };
-    const buildMenu = () => {
-      const items = [
-        { label: 'Show Dashboard', click: showDashboard },
-        { type: 'separator' },
-        { label: 'Quit', click: () => { isQuitting = true; app.quit(); } }
-      ];
+
+    const startWork = async () => {
+      try {
+        const work = loadWork();
+        if (work.current && !work.current.end_ts) {
+          notify('Already Working', 'You already have an active work session');
+          return;
+        }
+        work.current = { start_ts: nowIso(), end_ts: null, breaks: [], status: 'active' };
+        saveWork(work);
+        await backendPost('/session/start', {});
+        notify('Work Started', 'Your work timer has started. Have a productive day!');
+        buildMenu();
+      } catch (e) {
+        console.error('Error starting work:', e);
+      }
+    };
+
+    const takeBreak = async () => {
+      try {
+        const work = loadWork();
+        if (!work.current || work.current.end_ts) {
+          notify('Not Working', 'Please start work before taking a break');
+          return;
+        }
+
+        const breaks = work.current.breaks || [];
+        const onBreak = breaks.length > 0 && !breaks[breaks.length - 1].end_ts;
+
+        if (onBreak) {
+          // End break
+          breaks[breaks.length - 1].end_ts = nowIso();
+          work.current.status = 'active';
+          await backendPost('/session/break/end', {});
+          notify('Break Ended', 'Welcome back! Resuming work timer.');
+        } else {
+          // Start break
+          breaks.push({ start_ts: nowIso(), end_ts: null });
+          work.current.status = 'break';
+          await backendPost('/session/break/start', {});
+          notify('Break Started', 'Take a rest. Click again when ready to resume.');
+        }
+
+        saveWork(work);
+        buildMenu();
+      } catch (e) {
+        console.error('Error toggling break:', e);
+      }
+    };
+
+    const endWork = async () => {
+      try {
+        const work = loadWork();
+        if (!work.current || work.current.end_ts) {
+          notify('Not Working', 'No active work session to end');
+          return;
+        }
+
+        // Close any open break
+        const breaks = work.current.breaks || [];
+        if (breaks.length > 0 && !breaks[breaks.length - 1].end_ts) {
+          breaks[breaks.length - 1].end_ts = nowIso();
+        }
+
+        work.current.end_ts = nowIso();
+
+        // Calculate duration
+        const startTime = new Date(work.current.start_ts).getTime();
+        const endTime = new Date(work.current.end_ts).getTime();
+        const durationMs = endTime - startTime;
+        const breakMs = breaks.reduce((acc, b) => {
+          if (b.start_ts && b.end_ts) {
+            return acc + (new Date(b.end_ts).getTime() - new Date(b.start_ts).getTime());
+          }
+          return acc;
+        }, 0);
+        const workMs = Math.max(0, durationMs - breakMs);
+
+        work.sessions.push(work.current);
+        work.current = null;
+        saveWork(work);
+
+        await backendPost('/session/end', {});
+
+        notify('Work Ended', `Great job! You worked for ${formatDuration(workMs)} today.`);
+        buildMenu();
+      } catch (e) {
+        console.error('Error ending work:', e);
+      }
+    };
+
+    const buildMenu = async () => {
+      const status = await getWorkStatus();
+      const items = [];
+
+      // Status header
+      items.push({
+        label: `Status: ${status.label}`,
+        enabled: false
+      });
+
+      if (status.status !== 'idle') {
+        items.push({
+          label: `⏱️ Time Worked: ${formatDuration(status.duration)}`,
+          enabled: false
+        });
+      }
+
+      items.push({ type: 'separator' });
+
+      // Action buttons based on current status
+      if (status.status === 'idle') {
+        items.push({
+          label: '▶️ Start Work',
+          click: startWork
+        });
+      } else if (status.status === 'working') {
+        items.push({
+          label: '☕ Take Break',
+          click: takeBreak
+        });
+        items.push({
+          label: '⏹️ End Work',
+          click: endWork
+        });
+      } else if (status.status === 'break') {
+        items.push({
+          label: '▶️ Resume Work',
+          click: takeBreak
+        });
+        items.push({
+          label: '⏹️ End Work',
+          click: endWork
+        });
+      }
+
+      items.push({ type: 'separator' });
+      items.push({ label: '📊 Show Dashboard', click: showDashboard });
+      items.push({ type: 'separator' });
+      items.push({ label: '❌ Quit', click: () => { isQuitting = true; app.quit(); } });
+
       const m = Menu.buildFromTemplate(items);
       tray.setContextMenu(m);
+
+      // Update tooltip with status
+      if (status.status !== 'idle') {
+        tray.setToolTip(`WFH Agent - ${status.label}\nTime: ${formatDuration(status.duration)}`);
+      } else {
+        tray.setToolTip('WFH Agent - Not Working');
+      }
     };
+
     buildMenu();
     tray.on('click', showDashboard);
     tray.on('right-click', () => tray.popUpContextMenu());
     tray._rebuildMenu = buildMenu; // store for updater events
+
+    // Auto-update tray menu every minute to show elapsed time
+    setInterval(() => {
+      if (tray && !tray.isDestroyed()) {
+        buildMenu();
+      }
+    }, 60000); // Update every minute
+
+    // Periodic work notifications
+    startWorkNotifications();
+
     return tray;
   } catch (e) {
     console.warn('Failed to create system tray:', e.message);
     return null;
   }
+}
+
+// Periodic work notifications for better employee engagement
+let lastNotificationTime = 0;
+let notificationInterval = null;
+
+function startWorkNotifications() {
+  // Check every 5 minutes for notification triggers
+  if (notificationInterval) clearInterval(notificationInterval);
+
+  notificationInterval = setInterval(() => {
+    try {
+      const status = getWorkStatus();
+      const now = Date.now();
+
+      // Skip if idle or notification sent recently (within 10 minutes)
+      if (status.status === 'idle' || now - lastNotificationTime < 600000) {
+        return;
+      }
+
+      const workMinutes = Math.floor(status.duration / 60000);
+
+      // Break reminders every 2 hours of continuous work
+      if (status.status === 'working' && workMinutes > 0 && workMinutes % 120 === 0) {
+        notify('Time for a Break', `You've been working for ${Math.floor(workMinutes / 60)} hours. Consider taking a short break!`);
+        lastNotificationTime = now;
+        return;
+      }
+
+      // Milestone notifications
+      if (status.status === 'working') {
+        // 4 hours milestone
+        if (workMinutes >= 240 && workMinutes < 245) {
+          notify('Great Progress!', 'You\'ve completed 4 hours of work. Keep it up!');
+          lastNotificationTime = now;
+          return;
+        }
+
+        // 6 hours milestone
+        if (workMinutes >= 360 && workMinutes < 365) {
+          notify('Excellent Work!', 'You\'ve completed 6 hours of work today. Almost done!');
+          lastNotificationTime = now;
+          return;
+        }
+
+        // 8 hours milestone
+        if (workMinutes >= 480 && workMinutes < 485) {
+          notify('Full Day Complete!', 'Congratulations! You\'ve completed 8 hours of work today.');
+          lastNotificationTime = now;
+          return;
+        }
+      }
+
+      // Long break reminder (over 30 minutes)
+      if (status.status === 'break') {
+        const work = loadWork();
+        if (work.current && work.current.breaks) {
+          const breaks = work.current.breaks;
+          const currentBreak = breaks[breaks.length - 1];
+          if (currentBreak && !currentBreak.end_ts) {
+            const breakStart = new Date(currentBreak.start_ts).getTime();
+            const breakDuration = now - breakStart;
+            const breakMinutes = Math.floor(breakDuration / 60000);
+
+            if (breakMinutes >= 30 && breakMinutes < 35) {
+              notify('Long Break', 'You\'ve been on break for 30+ minutes. Ready to resume?');
+              lastNotificationTime = now;
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.error('Error in work notifications:', e);
+    }
+  }, 300000); // Check every 5 minutes
 }
 
 // Simple session storage in userData
@@ -190,16 +515,36 @@ async function drainQueue() {
   const base = cfg.serverUrl || 'http://127.0.0.1:5050';
   const next = [];
   let startedSynced = false;
+  const MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+
   for (const item of q) {
     try {
+      // Skip items older than 24 hours
+      const age = Date.now() - (item.ts || 0);
+      if (age > MAX_AGE_MS) {
+        console.log(`[queue] Discarding stale item: ${item.path} (age: ${Math.round(age/3600000)}h)`);
+        continue;
+      }
+
       const url = new URL(item.path, base).toString();
-      await httpPost(url, item.body || {}, { timeout: 5000 });
+      const response = await httpPost(url, item.body || {}, { timeout: 5000 });
       if (item.path === '/session/start') startedSynced = true;
+      console.log(`[queue] Successfully processed: ${item.path}`);
     } catch (e) {
-      console.warn('drainQueue failed', item.path, e.message);
-      next.push(item); // keep for next round
+      const errMsg = e.message || String(e);
+
+      // Don't retry 400/404 errors (bad requests)
+      if (errMsg.includes('HTTP 400') || errMsg.includes('HTTP 404')) {
+        console.warn(`[queue] Discarding invalid request: ${item.path} - ${errMsg}`);
+        continue; // Don't re-queue
+      }
+
+      // Retry other errors (network issues, 500s, etc.)
+      console.warn(`[queue] Retrying later: ${item.path} - ${errMsg}`);
+      next.push(item);
     }
   }
+
   saveQueue(next);
   if (startedSynced) {
     // Inform renderer that server session is now synced
@@ -321,6 +666,103 @@ function saveWork(work) {
   saveSession(sess);
 }
 
+// Validate and clean stale sessions
+async function validateAndCleanSessions() {
+  try {
+    const work = loadWork();
+    const now = Date.now();
+    const MAX_SESSION_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+    // Check if there's a current session
+    if (work.current && work.current.start_ts && !work.current.end_ts) {
+      const sessionAge = now - new Date(work.current.start_ts).getTime();
+
+      if (sessionAge > MAX_SESSION_AGE_MS) {
+        console.log(`[session] Detected stale session from ${work.current.start_ts} (age: ${Math.round(sessionAge / 3600000)}h)`);
+
+        // Auto-end the stale session with proper end time (24h after start or at work end time)
+        const startDate = new Date(work.current.start_ts);
+        const endDate = new Date(startDate);
+
+        // Set end time to 18:30 on the same day, or 24h later if that's passed
+        endDate.setHours(18, 30, 0, 0);
+        if (endDate <= startDate) {
+          endDate.setTime(startDate.getTime() + MAX_SESSION_AGE_MS);
+        }
+
+        work.current.end_ts = endDate.toISOString();
+
+        // Close any open breaks
+        if (work.current.breaks && work.current.breaks.length > 0) {
+          const lastBreak = work.current.breaks[work.current.breaks.length - 1];
+          if (lastBreak && !lastBreak.end_ts) {
+            lastBreak.end_ts = work.current.end_ts;
+          }
+        }
+
+        // Move to completed sessions
+        work.sessions.push(work.current);
+        work.current = null;
+        saveWork(work);
+
+        console.log('[session] Stale session auto-ended and archived');
+
+        // Try to sync to backend
+        try {
+          await backendPost('/session/end', {});
+        } catch (e) {
+          console.warn('[session] Failed to sync stale session to backend:', e.message);
+        }
+      }
+    }
+
+    return { ok: true, cleaned: work.current === null };
+  } catch (e) {
+    console.error('[session] Validation error:', e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
+// Sync Electron session with backend state
+async function syncSessionWithBackend() {
+  try {
+    const cfg = loadConfig();
+    const base = cfg.serverUrl || 'http://127.0.0.1:5050';
+    const url = new URL('/session/state', base).toString();
+
+    const response = await httpGet(url, { timeout: 3000 });
+    const backendState = response.data;
+
+    const work = loadWork();
+
+    console.log('[session] Backend state:', backendState.state?.status || 'unknown');
+    console.log('[session] Local state:', work.current ? 'active' : 'idle');
+
+    // If backend has active session but local doesn't, sync from backend
+    if (backendState.state?.start_ts && !backendState.state?.end_ts && !work.current) {
+      console.log('[session] Syncing active session from backend to local');
+      work.current = {
+        start_ts: backendState.state.start_ts,
+        end_ts: null,
+        breaks: backendState.state.breaks || [],
+        status: backendState.state.status || 'active'
+      };
+      saveWork(work);
+    }
+
+    // If local has active but backend doesn't, sync to backend
+    if (work.current && !work.current.end_ts && backendState.state?.status === 'idle') {
+      console.log('[session] Syncing active session from local to backend');
+      await backendPost('/session/start', {});
+    }
+
+    return { ok: true, synced: true };
+  } catch (e) {
+    console.warn('[session] Sync with backend failed:', e.message);
+    return { ok: false, error: e.message };
+  }
+}
+
 ipcMain.handle('work:state', async () => {
   const work = loadWork();
   return { ok: true, data: work };
@@ -333,6 +775,12 @@ ipcMain.handle('work:start', async () => {
   }
   work.current = { start_ts: nowIso(), end_ts: null, breaks: [], status: 'active' };
   saveWork(work);
+
+  // Update tray menu to reflect new status
+  if (tray && tray._rebuildMenu) {
+    tray._rebuildMenu();
+  }
+
   return { ok: true };
 });
 
@@ -350,6 +798,12 @@ ipcMain.handle('work:breakToggle', async () => {
     cur.status = 'break';
   }
   saveWork(work);
+
+  // Update tray menu to reflect new status
+  if (tray && tray._rebuildMenu) {
+    tray._rebuildMenu();
+  }
+
   return { ok: true, data: cur.status };
 });
 
@@ -357,14 +811,51 @@ ipcMain.handle('work:end', async () => {
   const work = loadWork();
   if (!work.current || work.current.end_ts) return { ok: false, error: 'No active session' };
   const cur = work.current;
+
   // Close any open break first
   const last = cur.breaks.length ? cur.breaks[cur.breaks.length - 1] : null;
   if (last && !last.end_ts) last.end_ts = nowIso();
+
   cur.end_ts = nowIso();
+
+  // Validate session duration (should not exceed 24 hours)
+  const startTime = new Date(cur.start_ts).getTime();
+  const endTime = new Date(cur.end_ts).getTime();
+  const durationMs = endTime - startTime;
+  const MAX_SESSION_DURATION = 24 * 60 * 60 * 1000; // 24 hours
+
+  if (durationMs > MAX_SESSION_DURATION || durationMs < 0) {
+    console.warn(`[session] Invalid session duration detected: ${Math.round(durationMs / 3600000)}h`);
+    // Cap end time to max 24 hours or work end time
+    const startDate = new Date(startTime);
+    const cappedEndDate = new Date(startDate);
+    cappedEndDate.setHours(18, 30, 0, 0);
+
+    if (cappedEndDate <= startDate || new Date().getTime() - cappedEndDate.getTime() > MAX_SESSION_DURATION) {
+      cappedEndDate.setTime(startTime + Math.min(durationMs, MAX_SESSION_DURATION));
+    }
+
+    cur.end_ts = cappedEndDate.toISOString();
+    console.log(`[session] Session duration capped to ${Math.round((new Date(cur.end_ts).getTime() - startTime) / 3600000)}h`);
+  }
+
   // finalize and push to sessions
   work.sessions.push(cur);
   work.current = null;
   saveWork(work);
+
+  // Sync to backend
+  try {
+    await backendPost('/session/end', {});
+  } catch (e) {
+    console.warn('[session] Failed to sync ended session to backend:', e.message);
+  }
+
+  // Update tray menu to reflect new status
+  if (tray && tray._rebuildMenu) {
+    tray._rebuildMenu();
+  }
+
   return { ok: true };
 });
 
@@ -737,6 +1228,39 @@ app.whenReady().then(async () => {
   nativeTheme.themeSource = 'light';
   // Ensure notifications work in dev on Windows
   try { app.setAppUserModelId('com.wfh.agent'); } catch (_) { }
+
+  // Initialize netLog for network debugging
+  try {
+    // Create netlogs directory
+    if (!fs.existsSync(NETLOG_DIR)) {
+      fs.mkdirSync(NETLOG_DIR, { recursive: true });
+    }
+
+    // Start network logging
+    const netLogPath = path.join(NETLOG_DIR, `netlog-${Date.now()}.json`);
+    await netLog.startLogging(netLogPath, { captureMode: 'includeSensitive', maxFileSize: 10485760 }); // 10MB max
+    console.log(`[netLog] Network logging started: ${netLogPath}`);
+
+    // Clean up old netlogs (keep last 5)
+    try {
+      const files = fs.readdirSync(NETLOG_DIR)
+        .filter(f => f.startsWith('netlog-') && f.endsWith('.json'))
+        .map(f => ({ name: f, time: fs.statSync(path.join(NETLOG_DIR, f)).mtime.getTime() }))
+        .sort((a, b) => b.time - a.time);
+
+      if (files.length > 5) {
+        for (let i = 5; i < files.length; i++) {
+          fs.unlinkSync(path.join(NETLOG_DIR, files[i].name));
+          console.log(`[netLog] Deleted old log: ${files[i].name}`);
+        }
+      }
+    } catch (e) {
+      console.warn('[netLog] Failed to clean old logs:', e.message);
+    }
+  } catch (e) {
+    console.warn('[netLog] Failed to start network logging:', e.message);
+  }
+
   // Create tray early
   createTray();
   // Clear any baked session on first run (per user profile)
@@ -754,10 +1278,64 @@ app.whenReady().then(async () => {
   if (!ok) {
     console.warn('Backend did not respond in time, UI will still load.');
   }
+
+  // Validate and clean stale sessions
+  console.log('[session] Running session validation...');
+  await validateAndCleanSessions();
+
+  // Sync session state with backend
+  console.log('[session] Syncing with backend...');
+  await syncSessionWithBackend();
+
   // Start watching for backend-generated notifications
   startAlertsWatcher();
   // Start periodic drain of offline queue
   setInterval(drainQueue, 30000);
+
+  // Periodic session sync (every hour)
+  setInterval(async () => {
+    console.log('[session] Periodic sync check...');
+    await validateAndCleanSessions();
+    await syncSessionWithBackend();
+  }, 60 * 60 * 1000); // 1 hour
+
+  // Real-time active session sync (every 5 minutes)
+  setInterval(async () => {
+    try {
+      const work = loadWork();
+      if (work.current && !work.current.end_ts) {
+        console.log('[session] Syncing active session state to backend...');
+
+        // Calculate current work/break durations
+        const startTime = new Date(work.current.start_ts).getTime();
+        const now = Date.now();
+        const totalMs = now - startTime;
+
+        const breakMs = (work.current.breaks || []).reduce((acc, b) => {
+          if (b.start_ts && b.end_ts) {
+            return acc + (new Date(b.end_ts).getTime() - new Date(b.start_ts).getTime());
+          }
+          return acc;
+        }, 0);
+
+        const workMs = Math.max(0, totalMs - breakMs);
+
+        // Send heartbeat update to backend
+        await backendPost('/session/heartbeat', {
+          start_ts: work.current.start_ts,
+          status: work.current.status,
+          breaks: work.current.breaks,
+          work_ms: workMs,
+          break_ms: breakMs,
+          total_ms: totalMs
+        });
+
+        console.log(`[session] Active session synced (work: ${Math.round(workMs/60000)}m)`);
+      }
+    } catch (e) {
+      console.warn('[session] Real-time sync failed:', e.message);
+    }
+  }, 5 * 60 * 1000); // 5 minutes
   // Power/session state integration: auto break/resume (only for real system events)
   try {
     // Only monitor actual system suspend/resume - not session switching
@@ -838,8 +1416,33 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-app.on('before-quit', () => {
+app.on('before-quit', async () => {
   isQuitting = true;
+
+  // Notify admin about app quit
+  try {
+    const work = loadWork();
+    const hasActiveSession = work.current && !work.current.end_ts;
+
+    await backendPost('/app/quit', {
+      reason: 'user_action',
+      has_active_session: hasActiveSession
+    });
+
+    console.log('[admin] Quit notification sent');
+  } catch (e) {
+    console.warn('[admin] Failed to send quit notification:', e.message);
+  }
+
+  // Stop network logging
+  try {
+    if (netLog.currentlyLogging) {
+      await netLog.stopLogging();
+      console.log('[netLog] Network logging stopped');
+    }
+  } catch (e) {
+    console.warn('[netLog] Failed to stop logging:', e.message);
+  }
 
   // Stop update checking
   stopPeriodicUpdateChecks();
@@ -1041,7 +1644,7 @@ function notify(title, body) {
 }
 
 function setupAutoUpdater() {
-  if (!app.isPackaged) return; // only in packaged builds
+  if (!app.isPackaged || !autoUpdater) return; // only in packaged builds with autoUpdater available
   try {
     // Configure electron-updater for GitHub releases
     autoUpdater.logger = {
@@ -1123,7 +1726,7 @@ function setupAutoUpdater() {
 }
 
 function startPeriodicUpdateChecks() {
-  if (!app.isPackaged) return;
+  if (!app.isPackaged || !autoUpdater) return;
 
   // Check for updates every 4 hours (14400000 ms)
   updateCheckInterval = setInterval(() => {
@@ -1146,7 +1749,7 @@ function stopPeriodicUpdateChecks() {
 }
 
 function checkForUpdates(silent = false) {
-  if (!app.isPackaged) {
+  if (!app.isPackaged || !autoUpdater) {
     if (!silent) notify('Updater disabled', 'Updates only work in packaged builds.');
     return;
   }
@@ -1163,11 +1766,11 @@ function checkForUpdates(silent = false) {
   }
 }
 function downloadUpdate() {
-  if (!app.isPackaged) return;
+  if (!app.isPackaged || !autoUpdater) return;
   try { autoUpdater.downloadUpdate(); } catch (e) { console.warn('downloadUpdate failed:', e.message); }
 }
 function installAndRestart() {
-  if (!app.isPackaged) return;
+  if (!app.isPackaged || !autoUpdater) return;
   try { autoUpdater.quitAndInstall(); } catch (e) { console.warn('quitAndInstall failed:', e.message); }
 }
 

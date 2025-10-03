@@ -178,18 +178,16 @@
       kpiAvg.textContent = msToHuman(k.avg_work_ms || 0);
       kpiSessions.textContent = (k.sessions_completed || 0).toString();
 
-      // Show newest first (descending by start_ts) and remove pagination navigation
+      // Show newest first (descending by start_ts)
       const rows = (res.data.rows || []).slice().sort((a, b) => {
         const ad = new Date(a.start_ts || a.start || 0).getTime();
         const bd = new Date(b.start_ts || b.start || 0).getTime();
         return bd - ad; // newest first
       });
       pagination.allRows = rows;
-      // Show all rows on a single page and hide controls
-      pagination.pageSize = rows.length || 1000;
       pagination.pageIndex = 0;
       const pagEl = document.querySelector('.table-pagination');
-      if (pagEl) pagEl.style.display = 'none';
+      if (pagEl) pagEl.style.display = 'flex';
       renderSessionsPage();
     }
   }
@@ -236,42 +234,63 @@
     if (wsPagePrev) wsPagePrev.disabled = clampedIndex <= 0;
     if (wsPageNext) wsPageNext.disabled = clampedIndex >= pages - 1;
 
-    // Render numbered page buttons (windowed, max 7)
+    // Render numbered page buttons
     if (wsPageNums) {
       wsPageNums.innerHTML = '';
-      const maxButtons = 7;
-      const half = Math.floor(maxButtons / 2);
-      let startPage = Math.max(0, clampedIndex - half);
-      let endPage = Math.min(pages - 1, startPage + maxButtons - 1);
-      // adjust start if we are near the end
-      startPage = Math.max(0, Math.min(startPage, endPage - (maxButtons - 1)));
 
-      function addBtn(label, page, active=false, disabled=false) {
-        const b = document.createElement('button');
-        b.className = 'btn sm' + (active ? ' green' : '');
-        b.textContent = String(label);
-        b.disabled = !!disabled;
-        if (!disabled) {
+      if (pages <= 7) {
+        // Show all pages if 7 or fewer
+        for (let p = 0; p < pages; p++) {
+          const b = document.createElement('button');
+          b.className = 'btn sm pager-btn' + (p === clampedIndex ? ' active' : '');
+          b.textContent = String(p + 1);
+          b.addEventListener('click', () => {
+            pagination.pageIndex = p;
+            renderSessionsPage();
+          });
+          wsPageNums.appendChild(b);
+        }
+      } else {
+        // For many pages: show first, pages around current, and last
+        const addBtn = (label, page, active=false) => {
+          const b = document.createElement('button');
+          b.className = 'btn sm pager-btn' + (active ? ' active' : '');
+          b.textContent = String(label);
           b.addEventListener('click', () => {
             pagination.pageIndex = page;
             renderSessionsPage();
           });
-        }
-        wsPageNums.appendChild(b);
-      }
+          wsPageNums.appendChild(b);
+        };
 
-      if (startPage > 0) {
-        addBtn(1, 0, false, false);
-        if (startPage > 1) {
-          const span = document.createElement('span'); span.textContent = '…'; span.style.margin = '0 4px'; wsPageNums.appendChild(span);
+        const addEllipsis = () => {
+          const span = document.createElement('span');
+          span.textContent = '...';
+          span.style.margin = '0 4px';
+          wsPageNums.appendChild(span);
+        };
+
+        // Always show first page
+        addBtn(1, 0, clampedIndex === 0);
+
+        if (clampedIndex > 3) {
+          addEllipsis();
         }
-      }
-      for (let p = startPage; p <= endPage; p++) addBtn(p + 1, p, p === clampedIndex, false);
-      if (endPage < pages - 1) {
-        if (endPage < pages - 2) {
-          const span = document.createElement('span'); span.textContent = '…'; span.style.margin = '0 4px'; wsPageNums.appendChild(span);
+
+        // Show pages around current page
+        const start = Math.max(1, clampedIndex - 1);
+        const end = Math.min(pages - 2, clampedIndex + 1);
+
+        for (let p = start; p <= end; p++) {
+          addBtn(p + 1, p, p === clampedIndex);
         }
-        addBtn(pages, pages - 1, false, false);
+
+        if (clampedIndex < pages - 4) {
+          addEllipsis();
+        }
+
+        // Always show last page
+        addBtn(pages, pages - 1, clampedIndex === pages - 1);
       }
     }
   }

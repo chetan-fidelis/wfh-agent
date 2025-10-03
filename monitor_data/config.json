@@ -1,5 +1,5 @@
 {
-  "emp_id": 18698,
+  "emp_id": 0,
   "features": {
     "itsm": true,
     "notifications": true,
@@ -11,14 +11,47 @@
     "esg": true,
     "scheduled_shots": true
   },
+  "work_hours": { "start": "09:30", "end": "18:30" },
+  "workdays": [1, 2, 3, 4, 5],
+  "break_window": { "start": "13:00", "duration_minutes": 60 },
+  "blocked_domains": [
+    "facebook.com",
+    "instagram.com",
+    "twitter.com"
+  ],
+  "productivity_tags": {
+    "code.exe": "productive",
+    "pycharm64.exe": "productive",
+    "idea64.exe": "productive",
+    "chrome.exe": "neutral",
+    "msedge.exe": "neutral",
+    "firefox.exe": "neutral",
+    "spotify.exe": "unproductive",
+    "steam.exe": "unproductive"
+  },
+  "website_tags": {
+  },
+  "wellness_thresholds": {
+    "min_work_secs": 18000,
+    "overtime_secs": 32400,
+    "min_active_ratio": 0.5,
+    "max_idle_ratio": 0.4,
+    "burnout_active_ratio": 0.7,
+    "bound_to_work_hours": true
+  },
   "geo": {
-    "mode": "ip_multi"
+    "manual": {},
+    "mode": "ip"
   },
   "ingestion": {
     "enabled": true,
     "mode": "postgres",
+    "direct_write": false,
     "batch_size": 200,
-    "flush_interval_sec": 5,
+    "flush_interval_sec": 30,
+    "heartbeat_sync_sec": 30,
+    "full_sync_sec": 60,
+    "file_retention_days": 60,
     "sampling": {
       "state_change": true,
       "periodic_sec": 60,
@@ -26,9 +59,35 @@
       "active_burst_cpu_percent": 50
     },
     "db": {
+      "schema": "employee_monitor",
       "url": "postgresql://postgres:zRJUvU28F2OZ@20.197.8.101:5432/employee_monitor",
-      "url_env": "postgresql://postgres:zRJUvU28F2OZ@20.197.8.101:5432/employee_monitor",
-      "schema": "employee_monitor"
+      "url_env": "EMP_DB_URL"
+    }
+  },
+  "logging": {
+    "verbose_local": true,
+    "verbose_db": false
+  },
+  "screenshot_upload": {
+    "enabled": true,
+    "server_url": ""
+  },
+  "admin_notifications": {
+    "enabled": true,
+    "webhook_url": "",
+    "email": {
+      "enabled": true,
+      "smtp_server": "smtp.office365.com",
+      "smtp_port": 587,
+      "from_email": "nexohr@fidelisgroup.in",
+      "to_emails": ["chetan.n@fidelisgroup.in"],
+      "username": "nexohr@fidelisgroup.in",
+      "password": "B@994498986594oh"
+    },
+    "events": {
+      "app_quit": true,
+      "session_end": false,
+      "policy_violation": true
     }
   }
 }

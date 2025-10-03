@@ -2,16 +2,48 @@ import os
 import sys
 import time
 import json
-import copy
-import threading
-import queue
-import shutil
-import socket
-import platform
 import datetime as dt
+import threading
+import sqlite3
+import subprocess
+import platform
+import re
+import copy
+import uuid
+import socket
+import ipaddress
+import random
+import shutil
+import base64
+import hashlib
+import urllib.parse
+from urllib.parse import urlparse
+from typing import Dict, List, Tuple, Optional, Any, Set, Union
 from dataclasses import dataclass, asdict
-from typing import List, Dict, Optional, Tuple
-import locale
+import warnings
+
+# Import LocalStorage for SQLite with Postgres sync
+try:
+    from local_storage import LocalStorage
+except ImportError:
+    # Define a stub class if the module is not available
+    class LocalStorage:
+        def __init__(self, *args, **kwargs):
+            pass
+        def log(self, message):
+            print(f"[LocalStorage-Stub] {message}")
+        def insert_website_usage(self, *args, **kwargs):
+            pass
+        def insert_productivity(self, *args, **kwargs):
+            pass
+        def insert_timeline(self, *args, **kwargs):
+            pass
+        def insert_screenshot(self, *args, **kwargs):
+            pass
+        def update_screenshot_upload(self, *args, **kwargs):
+            pass
+        def insert_wellness(self, *args, **kwargs):
+            pass
 
 # Third-party deps
 from flask import Flask, send_file, jsonify, Response, request
@@ -26,6 +58,12 @@ from pynput import keyboard, mouse
 from urllib.parse import urlparse
 import requests
 try:
+    # Suppress pkg_resources deprecation warning emitted by win10toast
+    warnings.filterwarnings(
+        'ignore',
+        category=UserWarning,
+        module=r'win10toast(\.|$)'
+    )
     from win10toast import ToastNotifier
 except Exception:
     ToastNotifier = None
@@ -240,11 +278,934 @@ if not os.path.exists(ITSM_TICKETS_JSON):
 
 
 @dataclass
+
+
+# Integrated LocalStorage class for SQLite with optimized Postgres sync
+class LocalStorage:
+    """Local SQLite storage with optimized periodic sync to Postgres"""
+    
+    def __init__(self, data_dir, app_ref=None):
+        self.data_dir = data_dir
+        self.db_path = os.path.join(data_dir, 'local_data.db')
+        self.app_ref = app_ref
+        self.last_sync = dt.datetime.now() - dt.timedelta(minutes=10)  # Force initial sync
+        self.last_full_sync = dt.datetime.now() - dt.timedelta(minutes=15)  # Force initial full sync
+        # Make sync intervals configurable
+        if self.app_ref and hasattr(self.app_ref, 'cfg'):
+            ing = self.app_ref.cfg.data.get('ingestion', {})
+            self.sync_interval = int(ing.get('heartbeat_sync_sec', 300))  # default 5 min
+            self.full_sync_interval = int(ing.get('full_sync_sec', 900))   # default 15 min
+        else:
+            # Safe defaults if config not available
+            self.sync_interval = 300
+            self.full_sync_interval = 900
+        # Ensure a lock exists for sync
+        self.sync_lock = threading.Lock()
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        # Create tables if they don't exist
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS website_usage (
+                emp_id INTEGER NOT NULL,
+                date TEXT NOT NULL,
+                domain TEXT NOT NULL,
+                duration_seconds REAL NOT NULL,
+                tag TEXT NOT NULL,
+                start_time TEXT,
+                end_time TEXT,
+                last_updated TEXT NOT NULL,
+                synced INTEGER DEFAULT 0,
+                PRIMARY KEY (emp_id, date, domain)
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS website_usage_by_tag (
+                emp_id INTEGER NOT NULL,
+                date TEXT NOT NULL,
+                tag TEXT NOT NULL,
+                duration_seconds REAL NOT NULL,
+                last_updated TEXT NOT NULL,
+                synced INTEGER DEFAULT 0,
+                PRIMARY KEY (emp_id, date, tag)
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS productivity (
+                emp_id INTEGER NOT NULL,
+                date TEXT NOT NULL,
+                process_name TEXT NOT NULL,
+                tag TEXT NOT NULL,
+                duration_seconds REAL NOT NULL,
+                last_updated TEXT NOT NULL,
+                synced INTEGER DEFAULT 0,
+                PRIMARY KEY (emp_id, date, process_name, tag)
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS productivity_by_tag (
+                emp_id INTEGER NOT NULL,
+                date TEXT NOT NULL,
+                tag TEXT NOT NULL,
+                duration_seconds REAL NOT NULL,
+                last_updated TEXT NOT NULL,
+                synced INTEGER DEFAULT 0,
+                PRIMARY KEY (emp_id, date, tag)
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS timeline (
+                emp_id INTEGER NOT NULL,
+                date TEXT NOT NULL,
+                hour INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                duration_seconds INTEGER NOT NULL,
+                last_updated TEXT NOT NULL,
+                synced INTEGER DEFAULT 0,
+                PRIMARY KEY (emp_id, date, hour, status)
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS screenshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                emp_id INTEGER NOT NULL,
+                file_name TEXT NOT NULL,
+                file_path TEXT NOT NULL,
+                file_size INTEGER NOT NULL,
+                captured_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                uploaded INTEGER DEFAULT 0,
+                upload_url TEXT,
+                synced INTEGER DEFAULT 0,
+                UNIQUE (emp_id, file_name)
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS wellness (
+                emp_id INTEGER NOT NULL,
+                date TEXT NOT NULL,
+                active_secs INTEGER NOT NULL,
+                idle_secs INTEGER NOT NULL,
+                offline_secs INTEGER NOT NULL,
+                work_secs INTEGER NOT NULL,
+                active_ratio REAL NOT NULL,
+                idle_ratio REAL NOT NULL,
+                utilization_percent REAL NOT NULL,
+                underutilized INTEGER NOT NULL,
+                overburdened INTEGER NOT NULL,
+                burnout_risk INTEGER NOT NULL,
+                steady_performer INTEGER NOT NULL,
+                last_updated TEXT NOT NULL,
+                synced INTEGER DEFAULT 0,
+                PRIMARY KEY (emp_id, date)
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS heartbeat (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                emp_id INTEGER NOT NULL,
+                ts TEXT NOT NULL,
+                status TEXT NOT NULL,
+                cpu_percent REAL NOT NULL,
+                memory_percent REAL NOT NULL,
+                process_name TEXT NOT NULL,
+                window_title TEXT NOT NULL,
+                domain TEXT,
+                url TEXT,
+                battery_level REAL,
+                battery_plugged INTEGER,
+                geo TEXT,
+                synced INTEGER DEFAULT 0,
+                UNIQUE (emp_id, ts)
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
+        
+        if self.app_ref:
+            self.log("SQLite database initialized")
+    
+    def log(self, message):
+        """Log message using app_ref if available"""
+        if self.app_ref and hasattr(self.app_ref, 'log'):
+            self.app_ref.log(message)
+        else:
+            print(f"[LocalStorage] {message}")
+    
+    def insert_heartbeat(self, emp_id, ts, status, cpu_percent, memory_percent, process_name, window_title, domain=None, url=None, battery_level=None, battery_plugged=None, geo=None):
+        """Insert heartbeat data into local SQLite"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        now = dt.datetime.now().isoformat()
+        
+        try:
+            cursor.execute('''
+                INSERT INTO heartbeat (
+                    emp_id, ts, status, cpu_percent, memory_percent, process_name, window_title,
+                    domain, url, battery_level, battery_plugged, geo, synced
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                ON CONFLICT (emp_id, ts) DO UPDATE SET
+                    status = ?,
+                    cpu_percent = ?,
+                    memory_percent = ?,
+                    process_name = ?,
+                    window_title = ?,
+                    domain = ?,
+                    url = ?,
+                    battery_level = ?,
+                    battery_plugged = ?,
+                    geo = ?,
+                    synced = 0
+            ''', (
+                emp_id, ts, status, cpu_percent, memory_percent, process_name, window_title,
+                domain, url, battery_level, battery_plugged, json.dumps(geo) if geo else None, 
+                # For ON CONFLICT UPDATE
+                status, cpu_percent, memory_percent, process_name, window_title,
+                domain, url, battery_level, battery_plugged, json.dumps(geo) if geo else None
+            ))
+            
+            conn.commit()
+            # Throttle verbose local DB logs
+            if self.app_ref and self.app_ref.cfg.data.get('logging', {}).get('verbose_local', False):
+                self.log(f"Heartbeat data saved to local DB: {ts} - {process_name}")
+        except Exception as e:
+            self.log(f"Error inserting heartbeat: {e}")
+        finally:
+            conn.close()
+        
+        # Sync heartbeat data immediately (but only heartbeat data)
+        self.check_sync_needed(data_type='heartbeat')
+    
+    def insert_website_usage(self, emp_id, date, domain, duration, tag):
+        """Insert website usage data into local SQLite"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        now = dt.datetime.now().isoformat()
+        
+        try:
+            # Insert/update website usage
+            cursor.execute('''
+                INSERT INTO website_usage (emp_id, date, domain, duration_seconds, tag, last_updated, synced)
+                VALUES (?, ?, ?, ?, ?, ?, 0)
+                ON CONFLICT (emp_id, date, domain) DO UPDATE SET
+                    duration_seconds = duration_seconds + ?,
+                    last_updated = ?,
+                    synced = 0
+            ''', (emp_id, date, domain, duration, tag, now, duration, now))
+            
+            # Insert/update website usage by tag
+            cursor.execute('''
+                INSERT INTO website_usage_by_tag (emp_id, date, tag, duration_seconds, last_updated, synced)
+                VALUES (?, ?, ?, ?, ?, 0)
+                ON CONFLICT (emp_id, date, tag) DO UPDATE SET
+                    duration_seconds = duration_seconds + ?,
+                    last_updated = ?,
+                    synced = 0
+            ''', (emp_id, date, tag, duration, now, duration, now))
+            
+            conn.commit()
+            if self.app_ref and self.app_ref.cfg.data.get('logging', {}).get('verbose_local', False):
+                self.log(f"Website usage data saved to local DB: {domain} - {duration} seconds")
+        except Exception as e:
+            self.log(f"Error inserting website usage: {e}")
+        finally:
+            conn.close()
+        
+        # Check if it's time for a full sync
+        self.check_sync_needed()
+    
+    def insert_productivity(self, emp_id, date, process_name, tag, duration):
+        """Insert productivity data into local SQLite"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        now = dt.datetime.now().isoformat()
+        
+        try:
+            # Insert/update productivity
+            cursor.execute('''
+                INSERT INTO productivity (emp_id, date, process_name, tag, duration_seconds, last_updated, synced)
+                VALUES (?, ?, ?, ?, ?, ?, 0)
+                ON CONFLICT (emp_id, date, process_name, tag) DO UPDATE SET
+                    duration_seconds = duration_seconds + ?,
+                    last_updated = ?,
+                    synced = 0
+            ''', (emp_id, date, process_name, tag, duration, now, duration, now))
+            
+            # Insert/update productivity by tag
+            cursor.execute('''
+                INSERT INTO productivity_by_tag (emp_id, date, tag, duration_seconds, last_updated, synced)
+                VALUES (?, ?, ?, ?, ?, 0)
+                ON CONFLICT (emp_id, date, tag) DO UPDATE SET
+                    duration_seconds = duration_seconds + ?,
+                    last_updated = ?,
+                    synced = 0
+            ''', (emp_id, date, tag, duration, now, duration, now))
+            
+            conn.commit()
+            if self.app_ref and self.app_ref.cfg.data.get('logging', {}).get('verbose_local', False):
+                self.log(f"Productivity data saved to local DB: {process_name} - {duration} seconds ({tag})")
+        except Exception as e:
+            self.log(f"Error inserting productivity: {e}")
+        finally:
+            conn.close()
+        
+        # Check if it's time for a full sync
+        self.check_sync_needed()
+    
+    def insert_timeline(self, emp_id, date, hour, status, duration):
+        """Insert timeline data into local SQLite"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        now = dt.datetime.now().isoformat()
+        
+        try:
+            cursor.execute('''
+                INSERT INTO timeline (emp_id, date, hour, status, duration_seconds, last_updated, synced)
+                VALUES (?, ?, ?, ?, ?, ?, 0)
+                ON CONFLICT (emp_id, date, hour, status) DO UPDATE SET
+                    duration_seconds = duration_seconds + ?,
+                    last_updated = ?,
+                    synced = 0
+            ''', (emp_id, date, hour, status, duration, now, duration, now))
+            
+            conn.commit()
+            if self.app_ref and self.app_ref.cfg.data.get('logging', {}).get('verbose_local', False):
+                self.log(f"Timeline data saved to local DB: {date} hour {hour} - {status} {duration} seconds")
+        except Exception as e:
+            self.log(f"Error inserting timeline: {e}")
+        finally:
+            conn.close()
+        
+        # Check if it's time for a full sync
+        self.check_sync_needed()
+    
+    def insert_screenshot(self, emp_id, file_name, file_path, file_size, captured_at):
+        """Insert screenshot metadata into local SQLite"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        now = dt.datetime.now().isoformat()
+        
+        try:
+            cursor.execute('''
+                INSERT INTO screenshots (emp_id, file_name, file_path, file_size, captured_at, created_at, synced)
+                VALUES (?, ?, ?, ?, ?, ?, 0)
+                ON CONFLICT (emp_id, file_name) DO UPDATE SET
+                    file_path = ?,
+                    file_size = ?,
+                    captured_at = ?,
+                    created_at = ?,
+                    synced = 0
+            ''', (emp_id, file_name, file_path, file_size, captured_at, now, file_path, file_size, captured_at, now))
+            
+            conn.commit()
+            if self.app_ref and self.app_ref.cfg.data.get('logging', {}).get('verbose_local', False):
+                self.log(f"Screenshot metadata saved to local DB: {file_name}")
+        except Exception as e:
+            self.log(f"Error inserting screenshot: {e}")
+        finally:
+            conn.close()
+        
+        # Sync screenshots immediately
+        self.check_sync_needed(data_type='screenshot')
+    
+    def update_screenshot_upload(self, emp_id, file_name, upload_url):
+        """Update screenshot upload status in local SQLite"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        now = dt.datetime.now().isoformat()
+        
+        try:
+            cursor.execute('''
+                UPDATE screenshots
+                SET uploaded = 1, upload_url = ?, last_updated = ?, synced = 0
+                WHERE emp_id = ? AND file_name = ?
+            ''', (upload_url, now, emp_id, file_name))
+            
+            conn.commit()
+            self.log(f"Screenshot upload status updated in local DB: {file_name}")
+        except Exception as e:
+            self.log(f"Error updating screenshot upload status: {e}")
+        finally:
+            conn.close()
+        
+        # Sync screenshots immediately
+        self.check_sync_needed(data_type='screenshot')
+    
+    def insert_wellness(self, emp_id, date, data):
+        """Insert wellness data into local SQLite"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        now = dt.datetime.now().isoformat()
+        
+        try:
+            cursor.execute('''
+                INSERT INTO wellness (
+                    emp_id, date, active_secs, idle_secs, offline_secs, work_secs,
+                    active_ratio, idle_ratio, utilization_percent,
+                    underutilized, overburdened, burnout_risk, steady_performer,
+                    last_updated, synced
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                ON CONFLICT (emp_id, date) DO UPDATE SET
+                    active_secs = ?,
+                    idle_secs = ?,
+                    offline_secs = ?,
+                    work_secs = ?,
+                    active_ratio = ?,
+                    idle_ratio = ?,
+                    utilization_percent = ?,
+                    underutilized = ?,
+                    overburdened = ?,
+                    burnout_risk = ?,
+                    steady_performer = ?,
+                    last_updated = ?,
+                    synced = 0
+            ''', (
+                emp_id, date, 
+                data['active_secs'], data['idle_secs'], data['offline_secs'], data['work_secs'],
+                data['active_ratio'], data['idle_ratio'], data['utilization_percent'],
+                1 if data['underutilized'] else 0, 
+                1 if data['overburdened'] else 0,
+                1 if data['burnout_risk'] else 0, 
+                1 if data['steady_performer'] else 0,
+                now,
+                # For ON CONFLICT UPDATE
+                data['active_secs'], data['idle_secs'], data['offline_secs'], data['work_secs'],
+                data['active_ratio'], data['idle_ratio'], data['utilization_percent'],
+                1 if data['underutilized'] else 0, 
+                1 if data['overburdened'] else 0,
+                1 if data['burnout_risk'] else 0, 
+                1 if data['steady_performer'] else 0,
+                now
+            ))
+            
+            conn.commit()
+            if self.app_ref and self.app_ref.cfg.data.get('logging', {}).get('verbose_local', False):
+                self.log(f"Wellness data saved to local DB for date: {date}")
+        except Exception as e:
+            self.log(f"Error inserting wellness: {e}")
+        finally:
+            conn.close()
+        
+        # Check if it's time for a full sync
+        self.check_sync_needed()
+    def check_sync_needed(self, data_type=None):
+        """Check if it's time to sync with Postgres
+        
+        Args:
+            data_type: Optional type of data being inserted. If specified, may trigger
+                      immediate sync for certain data types (e.g., screenshots)
+        """
+        now = dt.datetime.now()
+        
+        # For screenshots, sync immediately
+        if data_type == 'screenshot':
+            threading.Thread(target=self.sync_to_postgres, args=(['screenshots'],), daemon=True).start()
+            return
+            
+        # For heartbeat data, sync every sync_interval seconds
+        if data_type == 'heartbeat':
+            if (now - self.last_sync).total_seconds() >= self.sync_interval:
+                # Use a separate thread for sync to avoid blocking
+                threading.Thread(target=self.sync_to_postgres, args=(['heartbeat'],), daemon=True).start()
+                self.last_sync = now
+            # DON'T return here - continue to check full sync
+
+        # For all data types, sync everything every full_sync_interval seconds
+        if (now - self.last_full_sync).total_seconds() >= self.full_sync_interval:
+            threading.Thread(target=self.sync_to_postgres, daemon=True).start()
+            self.last_full_sync = now
+            self.last_sync = now
+    
+    def sync_to_postgres(self, tables_to_sync=None):
+        """Sync all unsynced data to Postgres
+        
+        Args:
+            tables_to_sync: Optional list of tables to sync. If None, sync all tables.
+        """
+        # Use lock to prevent multiple syncs running simultaneously
+        if not self.sync_lock.acquire(blocking=False):
+            self.log("Sync already in progress, skipping")
+            return
+        
+        try:
+            self.log(f"Starting sync to Postgres... Tables: {tables_to_sync or 'ALL'}")
+            
+            # Get app reference for Postgres connection
+            if not self.app_ref:
+                self.log("No app reference available for Postgres sync")
+                return
+            
+            # Check if Postgres is enabled
+            ing = self.app_ref.cfg.data.get('ingestion', {})
+            if ing.get('mode') != 'postgres':
+                self.log("Postgres sync not enabled in config")
+                return
+            
+            # Import psycopg here to avoid circular imports
+            try:
+                import psycopg
+            except ImportError:
+                self.log("psycopg not available, skipping sync")
+                return
+            
+            # Get Postgres connection details
+            db_cfg = ing.get('db', {})
+            dsn = (db_cfg.get('url') or '').strip() or os.environ.get(db_cfg.get('url_env', 'EMP_DB_URL'))
+            if not dsn:
+                self.log("No Postgres DSN available, skipping sync")
+                return
+            
+            schema = db_cfg.get('schema', 'employee_monitor')
+            
+            # Connect to SQLite to get unsynced data
+            sqlite_conn = sqlite3.connect(self.db_path)
+            sqlite_cursor = sqlite_conn.cursor()
+            
+            # Connect to Postgres
+            with psycopg.connect(dsn) as pg_conn:
+                with pg_conn.cursor() as pg_cur:
+                    # Determine which tables to sync
+                    all_tables = [
+                        'heartbeat', 'website_usage', 'website_usage_by_tag',
+                        'productivity', 'productivity_by_tag', 'timeline',
+                        'screenshots', 'wellness'
+                    ]
+                    
+                    tables = tables_to_sync if tables_to_sync else all_tables
+                    
+                    # Sync each table
+                    for table in tables:
+                        if table == 'heartbeat':
+                            self._sync_heartbeat(sqlite_cursor, pg_cur, schema)
+                        elif table == 'website_usage':
+                            self._sync_website_usage(sqlite_cursor, pg_cur, schema)
+                        elif table == 'website_usage_by_tag':
+                            self._sync_website_usage_by_tag(sqlite_cursor, pg_cur, schema)
+                        elif table == 'productivity':
+                            self._sync_productivity(sqlite_cursor, pg_cur, schema)
+                        elif table == 'productivity_by_tag':
+                            self._sync_productivity_by_tag(sqlite_cursor, pg_cur, schema)
+                        elif table == 'timeline':
+                            self._sync_timeline(sqlite_cursor, pg_cur, schema)
+                        elif table == 'screenshots':
+                            self._sync_screenshots(sqlite_cursor, pg_cur, schema)
+                        elif table == 'wellness':
+                            self._sync_wellness(sqlite_cursor, pg_cur, schema)
+            
+            sqlite_conn.close()
+            self.log(f"Sync to Postgres completed successfully for tables: {tables}")
+            
+        except Exception as e:
+            self.log(f"Error syncing to Postgres: {e}")
+        finally:
+            self.sync_lock.release()
+    
+    def _sync_heartbeat(self, sqlite_cursor, pg_cur, schema):
+        """Sync heartbeat data to Postgres"""
+        sqlite_cursor.execute("""
+            SELECT emp_id, ts, status, cpu_percent, memory_percent, process_name, window_title,
+                   domain, url, battery_level, battery_plugged, geo
+            FROM heartbeat WHERE synced = 0
+        """)
+        records = sqlite_cursor.fetchall()
+        
+        if not records:
+            return
+        
+        # Ensure table exists
+        pg_cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {schema}.heartbeat (
+                id SERIAL PRIMARY KEY,
+                emp_id INTEGER NOT NULL,
+                ts TIMESTAMPTZ NOT NULL,
+                status VARCHAR(20) NOT NULL,
+                cpu_percent REAL NOT NULL,
+                memory_percent REAL NOT NULL,
+                process_name VARCHAR(255) NOT NULL,
+                window_title TEXT NOT NULL,
+                domain VARCHAR(255),
+                url TEXT,
+                battery_level REAL,
+                battery_plugged BOOLEAN,
+                geo JSONB,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                UNIQUE (emp_id, ts)
+            )
+        """)
+        
+        # Batch insert
+        for record in records:
+            (emp_id, ts, status, cpu_percent, memory_percent, process_name, window_title,
+             domain, url, battery_level, battery_plugged, geo) = record
+            if battery_plugged is not None:
+                battery_plugged = bool(battery_plugged)
+            
+            pg_cur.execute(f"""
+                INSERT INTO {schema}.heartbeat 
+                (emp_id, ts, status, cpu_percent, memory_percent, process_name, window_title,
+                 domain, url, battery_level, battery_plugged, geo)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (emp_id, ts) DO NOTHING
+            """, (
+                emp_id, ts, status, cpu_percent, memory_percent, process_name, window_title,
+                domain, url, battery_level, battery_plugged, geo
+            ))
+        
+        # Mark as synced
+        sqlite_cursor.execute("UPDATE heartbeat SET synced = 1 WHERE synced = 0")
+        sqlite_cursor.connection.commit()
+        
+        self.log(f"Synced {len(records)} heartbeat records to Postgres")
+    def _sync_website_usage(self, sqlite_cursor, pg_cur, schema):
+        """Sync website usage data to Postgres"""
+        sqlite_cursor.execute("SELECT emp_id, date, domain, duration_seconds, tag FROM website_usage WHERE synced = 0")
+        records = sqlite_cursor.fetchall()
+        
+        if not records:
+            return
+        
+        # Ensure table exists
+        pg_cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {schema}.website_usage (
+                emp_id INTEGER NOT NULL,
+                date DATE NOT NULL,
+                domain VARCHAR(255) NOT NULL,
+                duration_seconds FLOAT NOT NULL,
+                tag VARCHAR(50) NOT NULL,
+                start_time TIMESTAMPTZ,
+                end_time TIMESTAMPTZ,
+                last_updated TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (emp_id, date, domain)
+            )
+        """)
+        
+        # Batch insert
+        for record in records:
+            emp_id, date, domain, duration, tag = record
+            pg_cur.execute(f"""
+                INSERT INTO {schema}.website_usage 
+                (emp_id, date, domain, duration_seconds, tag, last_updated)
+                VALUES (%s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (emp_id, date, domain) DO UPDATE SET
+                    duration_seconds = website_usage.duration_seconds + EXCLUDED.duration_seconds,
+                    last_updated = NOW()
+            """, (emp_id, date, domain, duration, tag))
+        
+        # Mark as synced
+        sqlite_cursor.execute("UPDATE website_usage SET synced = 1 WHERE synced = 0")
+        sqlite_cursor.connection.commit()
+        
+        self.log(f"Synced {len(records)} website usage records to Postgres")
+    
+    def _sync_website_usage_by_tag(self, sqlite_cursor, pg_cur, schema):
+        """Sync website usage by tag data to Postgres"""
+        sqlite_cursor.execute("SELECT emp_id, date, tag, duration_seconds FROM website_usage_by_tag WHERE synced = 0")
+        records = sqlite_cursor.fetchall()
+        
+        if not records:
+            return
+        
+        # Ensure table exists
+        pg_cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {schema}.website_usage_by_tag (
+                emp_id INTEGER NOT NULL,
+                date DATE NOT NULL,
+                tag VARCHAR(50) NOT NULL,
+                duration_seconds FLOAT NOT NULL,
+                last_updated TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (emp_id, date, tag)
+            )
+        """)
+        
+        # Batch insert
+        for record in records:
+            emp_id, date, tag, duration = record
+            pg_cur.execute(f"""
+                INSERT INTO {schema}.website_usage_by_tag 
+                (emp_id, date, tag, duration_seconds, last_updated)
+                VALUES (%s, %s, %s, %s, NOW())
+                ON CONFLICT (emp_id, date, tag) DO UPDATE SET
+                    duration_seconds = website_usage_by_tag.duration_seconds + EXCLUDED.duration_seconds,
+                    last_updated = NOW()
+            """, (emp_id, date, tag, duration))
+        
+        # Mark as synced
+        sqlite_cursor.execute("UPDATE website_usage_by_tag SET synced = 1 WHERE synced = 0")
+        sqlite_cursor.connection.commit()
+        
+        self.log(f"Synced {len(records)} website usage by tag records to Postgres")
+    
+    def _sync_productivity(self, sqlite_cursor, pg_cur, schema):
+        """Sync productivity data to Postgres"""
+        sqlite_cursor.execute("SELECT emp_id, date, process_name, tag, duration_seconds FROM productivity WHERE synced = 0")
+        records = sqlite_cursor.fetchall()
+        
+        if not records:
+            return
+        
+        # Ensure table exists
+        pg_cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {schema}.productivity (
+                emp_id INTEGER NOT NULL,
+                date DATE NOT NULL,
+                process_name VARCHAR(255) NOT NULL,
+                tag VARCHAR(50) NOT NULL,
+                duration_seconds FLOAT NOT NULL,
+                last_updated TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (emp_id, date, process_name, tag)
+            )
+        """)
+        
+        # Batch insert
+        for record in records:
+            emp_id, date, process_name, tag, duration = record
+            pg_cur.execute(f"""
+                INSERT INTO {schema}.productivity 
+                (emp_id, date, process_name, tag, duration_seconds, last_updated)
+                VALUES (%s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (emp_id, date, process_name, tag) DO UPDATE SET
+                    duration_seconds = productivity.duration_seconds + EXCLUDED.duration_seconds,
+                    last_updated = NOW()
+            """, (emp_id, date, process_name, tag, duration))
+        
+        # Mark as synced
+        sqlite_cursor.execute("UPDATE productivity SET synced = 1 WHERE synced = 0")
+        sqlite_cursor.connection.commit()
+        
+        self.log(f"Synced {len(records)} productivity records to Postgres")
+    
+    def _sync_productivity_by_tag(self, sqlite_cursor, pg_cur, schema):
+        """Sync productivity by tag data to Postgres"""
+        sqlite_cursor.execute("SELECT emp_id, date, tag, duration_seconds FROM productivity_by_tag WHERE synced = 0")
+        records = sqlite_cursor.fetchall()
+        
+        if not records:
+            return
+        
+        # Ensure table exists
+        pg_cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {schema}.productivity_by_tag (
+                emp_id INTEGER NOT NULL,
+                date DATE NOT NULL,
+                tag VARCHAR(50) NOT NULL,
+                duration_seconds FLOAT NOT NULL,
+                last_updated TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (emp_id, date, tag)
+            )
+        """)
+        
+        # Batch insert
+        for record in records:
+            emp_id, date, tag, duration = record
+            pg_cur.execute(f"""
+                INSERT INTO {schema}.productivity_by_tag 
+                (emp_id, date, tag, duration_seconds, last_updated)
+                VALUES (%s, %s, %s, %s, NOW())
+                ON CONFLICT (emp_id, date, tag) DO UPDATE SET
+                    duration_seconds = productivity_by_tag.duration_seconds + EXCLUDED.duration_seconds,
+                    last_updated = NOW()
+            """, (emp_id, date, tag, duration))
+        
+        # Mark as synced
+        sqlite_cursor.execute("UPDATE productivity_by_tag SET synced = 1 WHERE synced = 0")
+        sqlite_cursor.connection.commit()
+        
+        self.log(f"Synced {len(records)} productivity by tag records to Postgres")
+    def _sync_timeline(self, sqlite_cursor, pg_cur, schema):
+        """Sync timeline data to Postgres"""
+        sqlite_cursor.execute("SELECT emp_id, date, hour, status, duration_seconds FROM timeline WHERE synced = 0")
+        records = sqlite_cursor.fetchall()
+        
+        if not records:
+            return
+        
+        # Ensure table exists
+        pg_cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {schema}.timeline (
+                emp_id INTEGER NOT NULL,
+                date DATE NOT NULL,
+                hour INTEGER NOT NULL,
+                status VARCHAR(20) NOT NULL,
+                duration_seconds INTEGER NOT NULL,
+                last_updated TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (emp_id, date, hour, status)
+            )
+        """)
+        
+        # Batch insert
+        for record in records:
+            emp_id, date, hour, status, duration = record
+            pg_cur.execute(f"""
+                INSERT INTO {schema}.timeline 
+                (emp_id, date, hour, status, duration_seconds, last_updated)
+                VALUES (%s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (emp_id, date, hour, status) DO UPDATE SET
+                    duration_seconds = timeline.duration_seconds + EXCLUDED.duration_seconds,
+                    last_updated = NOW()
+            """, (emp_id, date, int(hour), status, duration))
+        
+        # Mark as synced
+        sqlite_cursor.execute("UPDATE timeline SET synced = 1 WHERE synced = 0")
+        sqlite_cursor.connection.commit()
+        
+        self.log(f"Synced {len(records)} timeline records to Postgres")
+    
+    def _sync_screenshots(self, sqlite_cursor, pg_cur, schema):
+        """Sync screenshots data to Postgres"""
+        sqlite_cursor.execute("""
+            SELECT emp_id, file_name, file_path, file_size, captured_at, created_at, uploaded, upload_url 
+            FROM screenshots WHERE synced = 0
+        """)
+        records = sqlite_cursor.fetchall()
+        
+        if not records:
+            return
+        
+        # Ensure table exists
+        pg_cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {schema}.screenshots (
+                id SERIAL PRIMARY KEY,
+                emp_id INTEGER NOT NULL,
+                file_name VARCHAR(255) NOT NULL,
+                file_path VARCHAR(512) NOT NULL,
+                file_size INTEGER NOT NULL,
+                captured_at TIMESTAMPTZ NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                uploaded BOOLEAN DEFAULT FALSE,
+                upload_url VARCHAR(512),
+                UNIQUE (emp_id, file_name)
+            )
+        """)
+        
+        # Batch insert
+        for record in records:
+            emp_id, file_name, file_path, file_size, captured_at, created_at, uploaded, upload_url = record
+            pg_cur.execute(f"""
+                INSERT INTO {schema}.screenshots 
+                (emp_id, file_name, file_path, file_size, captured_at, created_at, uploaded, upload_url)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (emp_id, file_name) DO UPDATE SET
+                    file_path = EXCLUDED.file_path,
+                    file_size = EXCLUDED.file_size,
+                    captured_at = EXCLUDED.captured_at,
+                    created_at = EXCLUDED.created_at,
+                    uploaded = EXCLUDED.uploaded,
+                    upload_url = EXCLUDED.upload_url
+            """, (emp_id, file_name, file_path, file_size, captured_at, created_at, bool(uploaded), upload_url))
+        
+        # Mark as synced
+        sqlite_cursor.execute("UPDATE screenshots SET synced = 1 WHERE synced = 0")
+        sqlite_cursor.connection.commit()
+        
+        self.log(f"Synced {len(records)} screenshot records to Postgres")
+    
+    def _sync_wellness(self, sqlite_cursor, pg_cur, schema):
+        """Sync wellness data to Postgres"""
+        sqlite_cursor.execute("""
+            SELECT emp_id, date, active_secs, idle_secs, offline_secs, work_secs,
+                   active_ratio, idle_ratio, utilization_percent,
+                   underutilized, overburdened, burnout_risk, steady_performer
+            FROM wellness WHERE synced = 0
+        """)
+        records = sqlite_cursor.fetchall()
+        
+        if not records:
+            return
+        
+        # Ensure table exists
+        pg_cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {schema}.wellness (
+                emp_id INTEGER NOT NULL,
+                date DATE NOT NULL,
+                active_secs INTEGER NOT NULL,
+                idle_secs INTEGER NOT NULL,
+                offline_secs INTEGER NOT NULL,
+                work_secs INTEGER NOT NULL,
+                active_ratio FLOAT NOT NULL,
+                idle_ratio FLOAT NOT NULL,
+                utilization_percent FLOAT NOT NULL,
+                underutilized BOOLEAN NOT NULL,
+                overburdened BOOLEAN NOT NULL,
+                burnout_risk BOOLEAN NOT NULL,
+                steady_performer BOOLEAN NOT NULL,
+                last_updated TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (emp_id, date)
+            )
+        """)
+        
+        # Batch insert
+        for record in records:
+            (emp_id, date, active_secs, idle_secs, offline_secs, work_secs,
+             active_ratio, idle_ratio, utilization_percent,
+             underutilized, overburdened, burnout_risk, steady_performer) = record
+            
+            pg_cur.execute(f"""
+                INSERT INTO {schema}.wellness 
+                (emp_id, date, active_secs, idle_secs, offline_secs, work_secs,
+                 active_ratio, idle_ratio, utilization_percent,
+                 underutilized, overburdened, burnout_risk, steady_performer, last_updated)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (emp_id, date) DO UPDATE SET
+                    active_secs = EXCLUDED.active_secs,
+                    idle_secs = EXCLUDED.idle_secs,
+                    offline_secs = EXCLUDED.offline_secs,
+                    work_secs = EXCLUDED.work_secs,
+                    active_ratio = EXCLUDED.active_ratio,
+                    idle_ratio = EXCLUDED.idle_ratio,
+                    utilization_percent = EXCLUDED.utilization_percent,
+                    underutilized = EXCLUDED.underutilized,
+                    overburdened = EXCLUDED.overburdened,
+                    burnout_risk = EXCLUDED.burnout_risk,
+                    steady_performer = EXCLUDED.steady_performer,
+                    last_updated = NOW()
+            """, (
+                emp_id, date, active_secs, idle_secs, offline_secs, work_secs,
+                active_ratio, idle_ratio, utilization_percent,
+                bool(underutilized), bool(overburdened), bool(burnout_risk), bool(steady_performer)
+            ))
+        
+        # Mark as synced
+        sqlite_cursor.execute("UPDATE wellness SET synced = 1 WHERE synced = 0")
+        sqlite_cursor.connection.commit()
+        
+        self.log(f"Synced {len(records)} wellness records to Postgres")
+
+@dataclass
 class ActivityStats:
     key_presses: int = 0
     mouse_clicks: int = 0
     last_activity_ts: float = 0.0
 
+
+def activity_asdict(act) -> Dict[str, Any]:
+    """Safely convert ActivityStats-like object to dict.
+    Falls back gracefully if it's not a dataclass instance.
+    """
+    try:
+        return asdict(act)  # works if dataclass instance
+    except Exception:
+        return {
+            "key_presses": int(getattr(act, "key_presses", 0) or 0),
+            "mouse_clicks": int(getattr(act, "mouse_clicks", 0) or 0),
+            "last_activity_ts": float(getattr(act, "last_activity_ts", 0.0) or 0.0),
+        }
 
 class Alerts:
     lock = threading.Lock()
@@ -454,8 +1415,56 @@ class ScheduledShooter(threading.Thread):
         return False
 
     def _upload_screenshot(self, file_path: str, timestamp: str):
-        """Upload screenshot to server if configured"""
+        """Upload screenshot to server if configured and store metadata in database"""
         try:
+            # Store in database if using Postgres
+            ing = self.app.cfg.data.get('ingestion', {})
+            if ing.get('mode') == 'postgres' and psycopg is not None:
+                db_cfg = ing.get('db', {})
+                dsn = (db_cfg.get('url') or '').strip() or os.environ.get(db_cfg.get('url_env', 'EMP_DB_URL'))
+                if dsn:
+                    schema = db_cfg.get('schema', 'employee_monitor')
+                    emp_id = int(self.app.cfg.data.get('emp_id', 0))
+                    
+                    # Get file info
+                    file_size = os.path.getsize(file_path)
+                    file_name = os.path.basename(file_path)
+                    captured_at = dt.datetime.strptime(timestamp, '%Y%m%d_%H%M%S')
+                    
+                    with psycopg.connect(dsn) as conn:
+                        with conn.cursor() as cur:
+                            # Create screenshots table if not exists
+                            cur.execute(f"""
+                                CREATE TABLE IF NOT EXISTS {schema}.screenshots (
+                                    id SERIAL PRIMARY KEY,
+                                    emp_id INTEGER NOT NULL,
+                                    file_name VARCHAR(255) NOT NULL,
+                                    file_path VARCHAR(512) NOT NULL,
+                                    file_size INTEGER NOT NULL,
+                                    captured_at TIMESTAMPTZ NOT NULL,
+                                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                                    uploaded BOOLEAN DEFAULT FALSE,
+                                    upload_url VARCHAR(512),
+                                    UNIQUE (emp_id, file_name)
+                                )
+                            """)
+                            
+                            # Insert screenshot metadata
+                            cur.execute(f"""
+                                INSERT INTO {schema}.screenshots 
+                                (emp_id, file_name, file_path, file_size, captured_at)
+                                VALUES (%s, %s, %s, %s, %s)
+                                ON CONFLICT (emp_id, file_name) DO UPDATE SET
+                                    file_path = EXCLUDED.file_path,
+                                    file_size = EXCLUDED.file_size,
+                                    captured_at = EXCLUDED.captured_at,
+                                    created_at = NOW()
+                            """, (emp_id, file_name, file_path, file_size, captured_at))
+                            
+                            conn.commit()
+                            Alerts.log(f"Screenshot metadata saved to database: {file_name}")
+            
+            # Also upload to server if configured
             upload_cfg = self.app.cfg.data.get('screenshot_upload', {})
             if not upload_cfg.get('enabled', False):
                 return
@@ -468,13 +1477,22 @@ class ScheduledShooter(threading.Thread):
             if not emp_id:
                 return
 
-            # Prepare upload data
+            # Prepare upload data with proper path structure: screenshot/empid/date/image.jpg
+            file_name = os.path.basename(file_path)
+            # Extract date from timestamp (format: YYYYMMDD_HHMMSS)
+            date_str = timestamp.split('_')[0]  # YYYYMMDD
+            date_formatted = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"  # YYYY-MM-DD
+
+            # Server path: screenshot/empid/date/filename.jpg
+            server_path = f"screenshot/{emp_id}/{date_formatted}/{file_name}"
+
             with open(file_path, 'rb') as f:
-                files = {'screenshot': (f'shot_{timestamp}.jpg', f, 'image/jpeg')}
+                files = {'screenshot': (file_name, f, 'image/jpeg')}
                 data = {
                     'emp_id': emp_id,
                     'timestamp': timestamp,
-                    'captured_at': dt.datetime.now().isoformat()
+                    'captured_at': dt.datetime.now().isoformat(),
+                    'server_path': server_path  # Desired server path
                 }
 
                 # Upload with timeout
@@ -484,7 +1502,22 @@ class ScheduledShooter(threading.Thread):
                 if response.status_code == 200:
                     result = response.json()
                     if result.get('success'):
-                        Alerts.log(f"Screenshot uploaded successfully: {result.get('url', 'N/A')}")
+                        final_url = result.get('url', server_path)  # Use returned URL or fallback to expected path
+                        Alerts.log(f"Screenshot uploaded successfully: {final_url}")
+
+                        # Update database with upload status and server path if using Postgres
+                        if ing.get('mode') == 'postgres' and psycopg is not None and dsn:
+                            try:
+                                with psycopg.connect(dsn) as conn:
+                                    with conn.cursor() as cur:
+                                        cur.execute(f"""
+                                            UPDATE {schema}.screenshots
+                                            SET uploaded = TRUE, upload_url = %s, file_path = %s
+                                            WHERE emp_id = %s AND file_name = %s
+                                        """, (final_url, server_path, emp_id, file_name))
+                                        conn.commit()
+                            except Exception as e:
+                                Alerts.log(f"Failed to update screenshot upload status: {e}")
                     else:
                         Alerts.log(f"Screenshot upload failed: {result.get('error', 'Unknown error')}")
                 else:
@@ -559,7 +1592,7 @@ class Heartbeat(threading.Thread):
                 hb = {
                     "ts": dt.datetime.now().isoformat(timespec='seconds'),
                     "current": cur,
-                    "activity": asdict(self.app_ref.activity),
+                    "activity": activity_asdict(self.app_ref.activity),
                     "cpu_percent": psutil.cpu_percent(interval=None),
                     "mem_percent": psutil.virtual_memory().percent,
                     "battery": batt,
@@ -626,10 +1659,15 @@ class Heartbeat(threading.Thread):
             pass
 
 class InputActivity:
+    """Cross-platform input activity tracking with Python 3.13 support"""
+
     def __init__(self, stats: ActivityStats):
         self.stats = stats
         self.k_listener = None
         self.m_listener = None
+        self.stop_event = threading.Event()
+        self.windows_hook_thread = None
+        self.use_windows_hooks = False
 
     def _on_key(self, key):
         self.stats.key_presses += 1
@@ -640,34 +1678,121 @@ class InputActivity:
             self.stats.mouse_clicks += 1
             self.stats.last_activity_ts = time.time()
 
+    def _windows_hook_worker(self):
+        """Windows-native input tracking using ctypes (Python 3.13 compatible)"""
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+
+            # Hook procedure types
+            HOOKPROC = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+
+            # Hook IDs
+            WH_KEYBOARD_LL = 13
+            WH_MOUSE_LL = 14
+
+            # Message types
+            WM_KEYDOWN = 0x0100
+            WM_SYSKEYDOWN = 0x0104
+            WM_LBUTTONDOWN = 0x0201
+            WM_RBUTTONDOWN = 0x0204
+            WM_MBUTTONDOWN = 0x0207
+
+            keyboard_hook = None
+            mouse_hook = None
+
+            def keyboard_hook_proc(nCode, wParam, lParam):
+                if nCode >= 0 and wParam in [WM_KEYDOWN, WM_SYSKEYDOWN]:
+                    self.stats.key_presses += 1
+                    self.stats.last_activity_ts = time.time()
+                return user32.CallNextHookEx(keyboard_hook, nCode, wParam, lParam)
+
+            def mouse_hook_proc(nCode, wParam, lParam):
+                if nCode >= 0 and wParam in [WM_LBUTTONDOWN, WM_RBUTTONDOWN, WM_MBUTTONDOWN]:
+                    self.stats.mouse_clicks += 1
+                    self.stats.last_activity_ts = time.time()
+                return user32.CallNextHookEx(mouse_hook, nCode, wParam, lParam)
+
+            # Create hook procedures
+            kb_proc = HOOKPROC(keyboard_hook_proc)
+            m_proc = HOOKPROC(mouse_hook_proc)
+
+            # Set hooks
+            keyboard_hook = user32.SetWindowsHookExA(WH_KEYBOARD_LL, kb_proc, None, 0)
+            mouse_hook = user32.SetWindowsHookExA(WH_MOUSE_LL, m_proc, None, 0)
+
+            if not keyboard_hook or not mouse_hook:
+                Alerts.log("Failed to set Windows hooks")
+                return
+
+            Alerts.log("Windows native input hooks installed successfully (Python 3.13 compatible)")
+
+            # Message loop
+            msg = wintypes.MSG()
+            while not self.stop_event.is_set():
+                if user32.PeekMessageA(ctypes.byref(msg), None, 0, 0, 1):  # PM_REMOVE = 1
+                    user32.TranslateMessage(ctypes.byref(msg))
+                    user32.DispatchMessageA(ctypes.byref(msg))
+                time.sleep(0.01)
+
+            # Unhook
+            if keyboard_hook:
+                user32.UnhookWindowsHookEx(keyboard_hook)
+            if mouse_hook:
+                user32.UnhookWindowsHookEx(mouse_hook)
+
+            Alerts.log("Windows native input hooks uninstalled")
+
+        except Exception as e:
+            Alerts.log(f"Windows hook worker error: {e}")
+
     def start(self):
-        # pynput has issues on Python 3.13 on Windows; disable gracefully
-        if sys.version_info >= (3, 13):
-            Alerts.log("pynput is not compatible with Python 3.13 on Windows; disabling input listeners. Activity will rely on foreground usage and idle heuristics.")
-            return
+        # Try Windows native hooks first (Python 3.13+ compatible)
+        if sys.platform == 'win32' and sys.version_info >= (3, 13):
+            try:
+                self.use_windows_hooks = True
+                self.stop_event.clear()
+                self.windows_hook_thread = threading.Thread(target=self._windows_hook_worker, daemon=True)
+                self.windows_hook_thread.start()
+                Alerts.log("Using Windows native hooks for input tracking (Python 3.13+)")
+                return
+            except Exception as e:
+                Alerts.log(f"Failed to start Windows hooks: {e}")
+                self.use_windows_hooks = False
+
+        # Fallback to pynput for Python < 3.13
         try:
             self.k_listener = keyboard.Listener(on_press=self._on_key)
             self.m_listener = mouse.Listener(on_click=self._on_click)
             self.k_listener.start()
             self.m_listener.start()
-            Alerts.log("Keyboard/Mouse activity listeners started")
+            Alerts.log("Keyboard/Mouse activity listeners started (pynput)")
         except NotImplementedError:
             Alerts.log("pynput listener not implemented on this platform/Python version; disabling input listeners.")
         except Exception as e:
             Alerts.log(f"Failed to start input listeners: {e}")
 
     def stop(self):
-        if self.k_listener:
-            self.k_listener.stop()
-        if self.m_listener:
-            self.m_listener.stop()
+        if self.use_windows_hooks:
+            self.stop_event.set()
+            if self.windows_hook_thread:
+                self.windows_hook_thread.join(timeout=2)
+        else:
+            if self.k_listener:
+                self.k_listener.stop()
+            if self.m_listener:
+                self.m_listener.stop()
 
 
 class ForegroundTracker(threading.Thread):
-    def __init__(self, stats: ActivityStats, cfg: Config):
+    def __init__(self, stats: ActivityStats, cfg: Config, app_ref: 'MonitorApp'):
         super().__init__(daemon=True)
         self.stats = stats
         self.cfg = cfg
+        self.app_ref = app_ref
         self.stop_event = threading.Event()
         self.current: Dict[str, str] = {"window": "", "process": "", "status": "unknown", "url": ""}
         self.usage: Dict[str, Dict[str, float]] = {}  # process -> {productive|unproductive|neutral: seconds}
@@ -676,6 +1801,12 @@ class ForegroundTracker(threading.Thread):
         self.website_usage_by_tag: Dict[str, float] = {"productive": 0.0, "unproductive": 0.0, "neutral": 0.0}
         self._uia_initialized = False
         self._is_on_break = False
+        # Aggregation buffers for batched writes
+        self._agg_prod: Dict[Tuple[str, str], float] = {}            # (exe, tag) -> secs
+        self._agg_timeline: Dict[Tuple[str, str, str], int] = {}     # (date, hour, status) -> secs
+        self._agg_web: Dict[Tuple[str, str], float] = {}             # (domain, tag) -> secs
+        self._flush_interval_sec = int(self.cfg.data.get('ingestion', {}).get('flush_interval_sec', 15))
+        self._last_flush_ts = time.time()
 
     def _get_foreground(self) -> Tuple[str, str, Optional[int]]:
         if not win32gui:
@@ -705,10 +1836,76 @@ class ForegroundTracker(threading.Thread):
         tag = self.cfg.productivity_tags.get(exe, 'neutral')
         self.usage.setdefault(exe, {"productive": 0.0, "unproductive": 0.0, "neutral": 0.0})
         self.usage[exe][tag] += secs
-        # persist periodically
+        
+        # Persist to file (legacy)
         if int(time.time()) % 15 == 0:
             with open(USAGE_JSON, 'w', encoding='utf-8') as f:
                 json.dump(self.usage, f, indent=2)
+        # Aggregate for batched SQLite writes
+        key = (exe, tag)
+        self._agg_prod[key] = self._agg_prod.get(key, 0.0) + secs
+        
+        # Optional: direct Postgres write (disabled by default; prefer periodic sync)
+        try:
+            ing = self.cfg.data.get('ingestion', {})
+            if ing.get('mode') == 'postgres' and ing.get('direct_write', False) and psycopg is not None:
+                db_cfg = ing.get('db', {})
+                dsn = (db_cfg.get('url') or '').strip() or os.environ.get(db_cfg.get('url_env', 'EMP_DB_URL'))
+                if dsn:
+                    schema = db_cfg.get('schema', 'employee_monitor')
+                    emp_id = self.cfg.data.get('emp_id', 0)
+                    today = dt.datetime.now().strftime('%Y-%m-%d')
+                    
+                    with psycopg.connect(dsn) as conn:
+                        with conn.cursor() as cur:
+                            # Create productivity table if not exists
+                            cur.execute(f"""
+                                CREATE TABLE IF NOT EXISTS {schema}.productivity (
+                                    emp_id INTEGER NOT NULL,
+                                    date DATE NOT NULL,
+                                    process_name VARCHAR(255) NOT NULL,
+                                    tag VARCHAR(50) NOT NULL,
+                                    duration_seconds FLOAT NOT NULL,
+                                    last_updated TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                                    PRIMARY KEY (emp_id, date, process_name, tag)
+                                )
+                            """)
+                            
+                            # Insert/update productivity data
+                            cur.execute(f"""
+                                INSERT INTO {schema}.productivity 
+                                (emp_id, date, process_name, tag, duration_seconds, last_updated)
+                                VALUES (%s, %s, %s, %s, %s, NOW())
+                                ON CONFLICT (emp_id, date, process_name, tag) DO UPDATE SET
+                                    duration_seconds = productivity.duration_seconds + EXCLUDED.duration_seconds,
+                                    last_updated = NOW()
+                            """, (emp_id, today, exe, tag, secs))
+                            
+                            # Also create and update productivity summary table
+                            cur.execute(f"""
+                                CREATE TABLE IF NOT EXISTS {schema}.productivity_by_tag (
+                                    emp_id INTEGER NOT NULL,
+                                    date DATE NOT NULL,
+                                    tag VARCHAR(50) NOT NULL,
+                                    duration_seconds FLOAT NOT NULL,
+                                    last_updated TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                                    PRIMARY KEY (emp_id, date, tag)
+                                )
+                            """)
+                            
+                            cur.execute(f"""
+                                INSERT INTO {schema}.productivity_by_tag 
+                                (emp_id, date, tag, duration_seconds, last_updated)
+                                VALUES (%s, %s, %s, %s, NOW())
+                                ON CONFLICT (emp_id, date, tag) DO UPDATE SET
+                                    duration_seconds = productivity_by_tag.duration_seconds + EXCLUDED.duration_seconds,
+                                    last_updated = NOW()
+                            """, (emp_id, today, tag, secs))
+                            
+                            conn.commit()
+                            Alerts.log(f"Productivity data saved to database: {exe} - {secs} seconds ({tag})")
+        except Exception as e:
+            Alerts.log(f"Productivity DB insert error: {e}")
 
     def _tick_timeline(self, status: str, secs: float):
         now = dt.datetime.now()
@@ -717,9 +1914,56 @@ class ForegroundTracker(threading.Thread):
         self.timeline.setdefault(date_key, {})
         self.timeline[date_key].setdefault(hour_key, {"active": 0, "idle": 0, "offline": 0})
         self.timeline[date_key][hour_key][status] += int(secs)
+        
+        # Persist to file (legacy)
         if int(time.time()) % 30 == 0:
             with open(TIMELINE_JSON, 'w', encoding='utf-8') as f:
                 json.dump(self.timeline, f, indent=2)
+        
+        # Aggregate for batched SQLite writes
+        tkey = (date_key, hour_key, status)
+        self._agg_timeline[tkey] = int(self._agg_timeline.get(tkey, 0)) + int(secs)
+        
+        # Save to database if using Postgres
+        try:
+            ing = self.cfg.data.get('ingestion', {})
+            if ing.get('mode') == 'postgres' and psycopg is not None:
+                db_cfg = ing.get('db', {})  
+                dsn = (db_cfg.get('url') or '').strip() or os.environ.get(db_cfg.get('url_env', 'EMP_DB_URL'))
+                if dsn:
+                    schema = db_cfg.get('schema', 'employee_monitor')
+                    emp_id = self.cfg.data.get('emp_id', 0)
+                    
+                    with psycopg.connect(dsn) as conn:
+                        with conn.cursor() as cur:
+                            # Create timeline table if not exists
+                            cur.execute(f"""
+                                CREATE TABLE IF NOT EXISTS {schema}.timeline (
+                                    emp_id INTEGER NOT NULL,
+                                    date DATE NOT NULL,
+                                    hour INTEGER NOT NULL,
+                                    status VARCHAR(20) NOT NULL,
+                                    duration_seconds INTEGER NOT NULL,
+                                    last_updated TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                                    PRIMARY KEY (emp_id, date, hour, status)
+                                )
+                            """)
+                            
+                            # Insert/update timeline data
+                            cur.execute(f"""
+                                INSERT INTO {schema}.timeline 
+                                (emp_id, date, hour, status, duration_seconds, last_updated)
+                                VALUES (%s, %s, %s, %s, %s, NOW())
+                                ON CONFLICT (emp_id, date, hour, status) DO UPDATE SET
+                                    duration_seconds = timeline.duration_seconds + EXCLUDED.duration_seconds,
+                                    last_updated = NOW()
+                            """, (emp_id, date_key, int(hour_key), status, int(secs)))
+                            
+                            conn.commit()
+                            if self.cfg.data.get('logging', {}).get('verbose_db', False):
+                                Alerts.log(f"Timeline data saved to database: {date_key} hour {hour_key} - {status} {int(secs)} seconds")
+        except Exception as e:
+            Alerts.log(f"Timeline DB insert error: {e}")
 
     def _extract_url_from_hwnd(self, exe: str, hwnd: Optional[int], title: str = "") -> str:
         if not auto or not hwnd:
@@ -833,17 +2077,120 @@ class ForegroundTracker(threading.Thread):
             return
         self.website_usage.setdefault(dom, 0.0)
         self.website_usage[dom] += secs
+        
+        # Save to file (legacy)
         if int(time.time()) % 15 == 0:
             with open(WEBSITE_USAGE_JSON, 'w', encoding='utf-8') as f:
                 json.dump(self.website_usage, f, indent=2)
+        
         # Aggregate by tag
         tag = self.cfg.data.get('website_tags', {}).get(dom, 'neutral')
         if tag not in self.website_usage_by_tag:
             self.website_usage_by_tag[tag] = 0.0
         self.website_usage_by_tag[tag] += secs
+        
+        # Save to file (legacy)
         if int(time.time()) % 15 == 0:
             with open(WEBSITE_USAGE_BY_TAG_JSON, 'w', encoding='utf-8') as f:
                 json.dump(self.website_usage_by_tag, f, indent=2)
+        
+        # Aggregate for batched SQLite writes
+        wkey = (dom, tag)
+        self._agg_web[wkey] = self._agg_web.get(wkey, 0.0) + secs
+        
+        # Save to database if using Postgres
+        try:
+            ing = self.cfg.data.get('ingestion', {})
+            if ing.get('mode') == 'postgres' and psycopg is not None:
+                db_cfg = ing.get('db', {})
+                dsn = (db_cfg.get('url') or '').strip() or os.environ.get(db_cfg.get('url_env', 'EMP_DB_URL'))
+                if dsn:
+                    schema = db_cfg.get('schema', 'employee_monitor')
+                    emp_id = self.cfg.data.get('emp_id', 0)
+                    today = dt.datetime.now().strftime('%Y-%m-%d')
+                    
+                    with psycopg.connect(dsn) as conn:
+                        with conn.cursor() as cur:
+                            # Force drop and recreate tables
+                            try:
+                                # First check if the table exists with wrong schema
+                                cur.execute(f"""
+                                    SELECT column_name FROM information_schema.columns 
+                                    WHERE table_schema = '{schema}' AND table_name = 'website_usage'
+                                """)
+                                columns = [row[0] for row in cur.fetchall()]
+                                
+                                # If table exists but doesn't have the right columns, drop it
+                                if columns and 'date' not in columns:
+                                    cur.execute(f"DROP TABLE IF EXISTS {schema}.website_usage CASCADE")
+                                    cur.execute(f"DROP TABLE IF EXISTS {schema}.website_usage_by_tag CASCADE")
+                                    Alerts.log(f"Dropped existing website_usage tables with incorrect schema")
+                            except Exception as e:
+                                Alerts.log(f"Error checking/dropping tables: {e}")
+                            
+                            # Create tables with correct schema
+                            cur.execute(f"""
+                                CREATE TABLE IF NOT EXISTS {schema}.website_usage (
+                                    emp_id INTEGER NOT NULL,
+                                    date DATE NOT NULL,
+                                    domain VARCHAR(255) NOT NULL,
+                                    duration_seconds FLOAT NOT NULL,
+                                    tag VARCHAR(50) NOT NULL,
+                                    last_updated TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                                    PRIMARY KEY (emp_id, date, domain)
+                                )
+                            """)
+                            
+                            # Insert/update website usage
+                            cur.execute(f"""
+                                INSERT INTO {schema}.website_usage (emp_id, date, domain, duration_seconds, tag, last_updated)
+                                VALUES (%s, %s, %s, %s, %s, NOW())
+                                ON CONFLICT (emp_id, date, domain) DO UPDATE SET
+                                    duration_seconds = website_usage.duration_seconds + EXCLUDED.duration_seconds,
+                                    last_updated = NOW()
+                            """, (emp_id, today, dom, secs, tag))
+                            
+                            # Also update tag summary table with the same approach
+                            try:
+                                # First check if the table exists with wrong schema
+                                cur.execute(f"""
+                                    SELECT column_name FROM information_schema.columns 
+                                    WHERE table_schema = '{schema}' AND table_name = 'website_usage_by_tag'
+                                """)
+                                columns = [row[0] for row in cur.fetchall()]
+                                
+                                # If table exists but doesn't have the right columns, drop it
+                                if columns and 'date' not in columns:
+                                    cur.execute(f"DROP TABLE IF EXISTS {schema}.website_usage_by_tag CASCADE")
+                                    Alerts.log(f"Dropped existing website_usage_by_tag table with incorrect schema")
+                            except Exception as e:
+                                Alerts.log(f"Error checking/dropping website_usage_by_tag table: {e}")
+                                
+                            # Create tag summary table
+                            cur.execute(f"""
+                                CREATE TABLE IF NOT EXISTS {schema}.website_usage_by_tag (
+                                    emp_id INTEGER NOT NULL,
+                                    date DATE NOT NULL,
+                                    tag VARCHAR(50) NOT NULL,
+                                    duration_seconds FLOAT NOT NULL,
+                                    last_updated TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                                    PRIMARY KEY (emp_id, date, tag)
+                                )
+                            """)
+                            
+                            cur.execute(f"""
+                                INSERT INTO {schema}.website_usage_by_tag (emp_id, date, tag, duration_seconds, last_updated)
+                                VALUES (%s, %s, %s, %s, NOW())
+                                ON CONFLICT (emp_id, date, tag) DO UPDATE SET
+                                    duration_seconds = website_usage_by_tag.duration_seconds + EXCLUDED.duration_seconds,
+                                    last_updated = NOW()
+                            """, (emp_id, today, tag, secs))
+                            
+                            conn.commit()
+                            if self.cfg.data.get('logging', {}).get('verbose_db', False):
+                                Alerts.log(f"Website usage data saved to database: {dom} - {secs} seconds")
+        except Exception as e:
+            Alerts.log(f"Website usage DB insert error: {e}")
 
     def run(self):
         last_title, last_exe = None, None
@@ -1003,6 +2350,85 @@ def collect_devices_info():
     return info
 
 
+def send_admin_notification(event_type: str, data: Dict, cfg: Optional['Config'] = None):
+    """Send admin notification via webhook or email"""
+    try:
+        if not cfg:
+            return
+
+        admin_notif = cfg.data.get('admin_notifications', {})
+        if not admin_notif.get('enabled'):
+            return
+
+        # Check if this event type is enabled
+        events = admin_notif.get('events', {})
+        if not events.get(event_type):
+            return
+
+        emp_id = cfg.data.get('emp_id', 0)
+        hostname = socket.gethostname()
+        timestamp = dt.datetime.now().isoformat()
+
+        payload = {
+            "event": event_type,
+            "employee_id": emp_id,
+            "hostname": hostname,
+            "timestamp": timestamp,
+            "data": data
+        }
+
+        # Send webhook if configured
+        webhook_url = admin_notif.get('webhook_url', '').strip()
+        if webhook_url:
+            try:
+                resp = requests.post(webhook_url, json=payload, timeout=10)
+                if resp.status_code >= 200 and resp.status_code < 300:
+                    Alerts.log(f"Admin notification sent: {event_type}")
+                else:
+                    Alerts.log(f"Admin notification failed: HTTP {resp.status_code}")
+            except Exception as e:
+                Alerts.log(f"Webhook notification error: {e}")
+
+        # Send email if configured
+        email_cfg = admin_notif.get('email', {})
+        if email_cfg.get('enabled'):
+            try:
+                import smtplib
+                from email.mime.text import MIMEText
+                from email.mime.multipart import MIMEMultipart
+
+                # Create email message
+                msg = MIMEMultipart()
+                msg['From'] = email_cfg.get('from_email', '')
+                msg['To'] = ', '.join(email_cfg.get('to_emails', []))
+                msg['Subject'] = f"[WFH Agent] {event_type.replace('_', ' ').title()} - Employee {emp_id}"
+
+                body = f"""
+Event: {event_type.replace('_', ' ').title()}
+Employee ID: {emp_id}
+Hostname: {hostname}
+Time: {timestamp}
+
+Details:
+{json.dumps(data, indent=2)}
+"""
+                msg.attach(MIMEText(body, 'plain'))
+
+                # Send email
+                server = smtplib.SMTP(email_cfg.get('smtp_server', 'smtp.gmail.com'),
+                                     email_cfg.get('smtp_port', 587))
+                server.starttls()
+                server.login(email_cfg.get('username', ''), email_cfg.get('password', ''))
+                server.send_message(msg)
+                server.quit()
+
+                Alerts.log(f"Admin email notification sent: {event_type}")
+            except Exception as e:
+                Alerts.log(f"Email notification error: {e}")
+
+    except Exception as e:
+        Alerts.log(f"Admin notification error: {e}")
+
 def compute_wellness(timeline_path: str = TIMELINE_JSON, cfg: Optional['Config'] = None) -> Dict:
     """Compute daily wellness with thresholds and flags; optionally bound to work hours."""
     # Load timeline
@@ -1078,8 +2504,86 @@ def compute_wellness(timeline_path: str = TIMELINE_JSON, cfg: Optional['Config']
             "steady_performer": steady_performer,
         }
 
+    # Save to file (legacy)
     with open(WELLNESS_JSON, 'w', encoding='utf-8') as f:
         json.dump(summary, f, indent=2)
+    
+    # Save to local SQLite if config is available
+    if cfg is not None and hasattr(cfg, "app_ref") and hasattr(cfg.app_ref, "local_storage"):
+        try:
+            emp_id = cfg.data.get("emp_id", 0)
+            for day, data in summary.items():
+                cfg.app_ref.local_storage.insert_wellness(emp_id, day, data)
+        except Exception as e:
+            print(f"Wellness local DB insert error: {e}")
+    
+    # Save to database if using Postgres and config is available
+    if cfg is not None:
+        try:
+            ing = cfg.data.get('ingestion', {})
+            if ing.get('mode') == 'postgres' and psycopg is not None:
+                db_cfg = ing.get('db', {})
+                dsn = (db_cfg.get('url') or '').strip() or os.environ.get(db_cfg.get('url_env', 'EMP_DB_URL'))
+                if dsn:
+                    schema = db_cfg.get('schema', 'employee_monitor')
+                    emp_id = cfg.data.get('emp_id', 0)
+                    
+                    with psycopg.connect(dsn) as conn:
+                        with conn.cursor() as cur:
+                            # Create wellness table if not exists
+                            cur.execute(f"""
+                                CREATE TABLE IF NOT EXISTS {schema}.wellness (
+                                    emp_id INTEGER NOT NULL,
+                                    date DATE NOT NULL,
+                                    active_secs INTEGER NOT NULL,
+                                    idle_secs INTEGER NOT NULL,
+                                    offline_secs INTEGER NOT NULL,
+                                    work_secs INTEGER NOT NULL,
+                                    active_ratio FLOAT NOT NULL,
+                                    idle_ratio FLOAT NOT NULL,
+                                    utilization_percent FLOAT NOT NULL,
+                                    underutilized BOOLEAN NOT NULL,
+                                    overburdened BOOLEAN NOT NULL,
+                                    burnout_risk BOOLEAN NOT NULL,
+                                    steady_performer BOOLEAN NOT NULL,
+                                    last_updated TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                                    PRIMARY KEY (emp_id, date)
+                                )
+                            """)
+                            
+                            # Insert/update wellness data for each day
+                            for day, data in summary.items():
+                                cur.execute(f"""
+                                    INSERT INTO {schema}.wellness 
+                                    (emp_id, date, active_secs, idle_secs, offline_secs, work_secs, 
+                                     active_ratio, idle_ratio, utilization_percent, underutilized, 
+                                     overburdened, burnout_risk, steady_performer, last_updated)
+                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                                    ON CONFLICT (emp_id, date) DO UPDATE SET
+                                        active_secs = EXCLUDED.active_secs,
+                                        idle_secs = EXCLUDED.idle_secs,
+                                        offline_secs = EXCLUDED.offline_secs,
+                                        work_secs = EXCLUDED.work_secs,
+                                        active_ratio = EXCLUDED.active_ratio,
+                                        idle_ratio = EXCLUDED.idle_ratio,
+                                        utilization_percent = EXCLUDED.utilization_percent,
+                                        underutilized = EXCLUDED.underutilized,
+                                        overburdened = EXCLUDED.overburdened,
+                                        burnout_risk = EXCLUDED.burnout_risk,
+                                        steady_performer = EXCLUDED.steady_performer,
+                                        last_updated = NOW()
+                                """, (
+                                    emp_id, day, data['active_secs'], data['idle_secs'], 
+                                    data['offline_secs'], data['work_secs'], data['active_ratio'], 
+                                    data['idle_ratio'], data['utilization_percent'], data['underutilized'], 
+                                    data['overburdened'], data['burnout_risk'], data['steady_performer']
+                                ))
+                            
+                            conn.commit()
+                            Alerts.log(f"Wellness data saved to database for {len(summary)} days")
+        except Exception as e:
+            Alerts.log(f"Wellness DB insert error: {e}")
+    
     return summary
 
 
@@ -1159,12 +2663,21 @@ def compute_esg(cfg: Optional['Config'] = None, country_override: Optional[str] 
 
 
 class MonitorApp:
+    def log(self, message):
+        """Log message to alerts log"""
+        # Use the in-file Alerts class
+        Alerts.log(message)
+
     def __init__(self):
         self.cfg = Config(CONFIG_PATH)
         self.activity = ActivityStats()
+        
+        # Try to load employee ID from session file
+        self._load_emp_id_from_session()
+        
         self.screen = ScreenRecorder(self.activity)
         self.inputs = InputActivity(self.activity)
-        self.fg = ForegroundTracker(self.activity, self.cfg)
+        self.fg = ForegroundTracker(self.activity, self.cfg, self)
         self.usb = USBDetector()
         self.blocker = DomainBlocker(self.cfg)
         self.heartbeat = Heartbeat(self)
@@ -1173,7 +2686,91 @@ class MonitorApp:
         self._geo_cache: Dict[str, any] = {"ts": 0, "data": {}}
         self._notifier = NotificationManager(self)
         self.itsm = ITSMHelper(self)
+        self.session_monitor: Optional['WorkSessionMonitor'] = None
         self.shooter: Optional[ScheduledShooter] = None
+
+        # Initialize work session state
+        self._work_session: Dict = {}
+
+        # Initialize local storage with SQLite and Postgres sync
+        self.local_storage = LocalStorage(DATA_DIR, self)
+        # Initialize session watcher controls
+        self._session_watch_stop = threading.Event()
+        self._session_watch_thread = None
+        
+    def _load_emp_id_from_session(self):
+        """Load employee ID from Electron session file if available"""
+        try:
+            # Session file is in Electron's userData directory
+            # For Windows: %APPDATA%\wfh-agent-desktop\session.json
+            app_name = 'wfh-agent-desktop'
+            if sys.platform == 'win32':
+                session_dir = os.path.join(os.environ.get('APPDATA', ''), app_name)
+                session_path = os.path.join(session_dir, 'session.json')
+            elif sys.platform == 'darwin':
+                session_dir = os.path.join(os.path.expanduser('~/Library/Application Support'), app_name)
+                session_path = os.path.join(session_dir, 'session.json')
+            else:  # Linux
+                session_dir = os.path.join(os.path.expanduser('~/.config'), app_name)
+                session_path = os.path.join(session_dir, 'session.json')
+            
+            # Test if we can access the directory
+            Alerts.log(f"Looking for session file at: {session_path}")
+            test_file = os.path.join(session_dir, 'test_access.txt')
+            try:
+                if os.path.exists(session_dir):
+                    with open(test_file, 'w') as f:
+                        f.write('Test access to session directory')
+                    Alerts.log(f"Successfully wrote test file to {test_file}")
+                else:
+                    Alerts.log(f"Session directory does not exist: {session_dir}")
+            except Exception as e:
+                Alerts.log(f"Failed to write test file: {e}")
+                
+            # Try alternate locations
+            alt_paths = [
+                os.path.join(os.environ.get('LOCALAPPDATA', ''), app_name, 'session.json'),
+                os.path.join(os.path.dirname(DATA_DIR), 'session.json'),
+                os.path.join(os.path.dirname(os.path.dirname(DATA_DIR)), 'session.json')
+            ]
+            for alt_path in alt_paths:
+                if os.path.exists(alt_path):
+                    Alerts.log(f"Found session file at alternate location: {alt_path}")
+                    session_path = alt_path
+                    break
+            if os.path.exists(session_path):
+                with open(session_path, 'r', encoding='utf-8') as f:
+                    session_data = json.load(f)
+                    if session_data and 'hrmsEmpId' in session_data and session_data['hrmsEmpId']:
+                        emp_id = int(session_data['hrmsEmpId'])
+                        if emp_id > 0:
+                            self.cfg.data['emp_id'] = emp_id
+                            Alerts.log(f"Loaded employee ID {emp_id} from session")
+        except Exception as e:
+            Alerts.log(f"Failed to read emp_id from session: {e}")
+            # Continue with default/config emp_id
+
+    def _watch_session_emp(self):
+        """Background watcher to pick up emp_id changes from Electron session.json without restart."""
+        last_emp = int(self.cfg.data.get('emp_id', 0) or 0)
+        while not self._session_watch_stop.is_set():
+            try:
+                self._load_emp_id_from_session()
+                cur_emp = int(self.cfg.data.get('emp_id', 0) or 0)
+                if cur_emp and cur_emp != last_emp:
+                    last_emp = cur_emp
+                    try:
+                        self.cfg.save()
+                    except Exception:
+                        pass
+                    Alerts.log(f"Session watcher: emp_id updated to {cur_emp}")
+            except Exception as e:
+                Alerts.log(f"Session watcher error: {e}")
+            # Sleep with event wait to allow fast shutdown
+            try:
+                self._session_watch_stop.wait(10.0)
+            except Exception:
+                time.sleep(10.0)
 
     def start(self, enable_http: bool = False, host: str = '127.0.0.1', port: int = 5000):
         Alerts.log("Starting Employee Monitor")
@@ -1200,11 +2797,37 @@ class MonitorApp:
         if self.cfg.data.get('features', {}).get('scheduled_shots', True):
             self.shooter = ScheduledShooter(self)
             self.shooter.start()
+        # Start work session monitor for auto-stop limits
+        try:
+            self.session_monitor = WorkSessionMonitor(self)
+            self.session_monitor.start()
+            Alerts.log("Work session monitor started")
+        except Exception as e:
+            Alerts.log(f"Failed to start work session monitor: {e}")
+        # Start session watcher to pick up emp_id from Electron login session
+        try:
+            if not self._session_watch_thread or not self._session_watch_thread.is_alive():
+                self._session_watch_thread = threading.Thread(target=self._watch_session_emp, daemon=True)
+                self._session_watch_thread.start()
+        except Exception as e:
+            Alerts.log(f"Failed to start session watcher: {e}")
+
+        # Trigger initial full sync on startup
+        try:
+            Alerts.log("Triggering initial full data sync to PostgreSQL...")
+            threading.Thread(target=self.local_storage.sync_to_postgres, daemon=True).start()
+        except Exception as e:
+            Alerts.log(f"Failed to trigger initial sync: {e}")
+
         if enable_http:
             self._start_http(host, port)
 
     def stop(self):
         Alerts.log("Stopping Employee Monitor")
+        try:
+            self._session_watch_stop.set()
+        except Exception:
+            pass
         self.screen.stop()
         self.fg.stop()
         self.usb.stop()
@@ -1269,18 +2892,29 @@ class MonitorApp:
             # Redact sensitive config fields before exposing in /status
             try:
                 cfg_copy = copy.deepcopy(self.cfg.data)
-                ing = cfg_copy.get('ingestion') or {}
-                db = ing.get('db') or {}
-                if isinstance(db, dict):
-                    db['url'] = ''
-                    db['url_env'] = ''
-                    ing['db'] = db
-                cfg_copy['ingestion'] = ing
+                # Keep actual ingestion mode but hide DB credentials
+                ing = cfg_copy.get('ingestion', {})
+                if isinstance(ing, dict):
+                    # Keep original mode (postgres/file) but hide credentials
+                    db = ing.get('db', {})
+                    if isinstance(db, dict):
+                        # Ensure DB credentials are always blank
+                        db['url'] = ''
+                        db['url_env'] = ''
+                        ing['db'] = db
+                    cfg_copy['ingestion'] = ing
+                # Use emp_id from login session if available (already loaded by _load_emp_id_from_session)
+                # Just use the current emp_id from self.cfg.data which should be updated by the session watcher
+                if self.cfg.data.get('emp_id', 0) > 0:
+                    cfg_copy['emp_id'] = self.cfg.data.get('emp_id', 0)
             except Exception:
                 cfg_copy = {"error": "config_unavailable"}
+            # Get the actual employee ID for the response
+            emp_id = self.cfg.data.get('emp_id', 0)
+            
             return jsonify({
                 "current": cur,
-                "activity": asdict(self.activity),
+                "activity": activity_asdict(self.activity),
                 "usage": usage,
                 "website_usage": web_usage,
                 "website_usage_by_tag": web_usage_by_tag,
@@ -1288,6 +2922,7 @@ class MonitorApp:
                 "config": cfg_copy,
                 "battery": battery,
                 "geo": geo,
+                "employee_id": emp_id  # Add employee ID as a separate field
             })
 
         @app.route('/latest.jpg', methods=['GET'])
@@ -1322,6 +2957,7 @@ class MonitorApp:
         # ---------------- Work Session API (server-side) ----------------
         # In-memory current session; persisted on end. Fallback to file if Postgres not available.
         self._work_session: Dict = getattr(self, '_work_session', {}) or {}
+        self._last_activity_ts: Optional[float] = None  # Track last system activity for shutdown detection
 
         def _now_iso() -> str:
             return dt.datetime.now(dt.timezone.utc).isoformat()
@@ -1355,6 +2991,38 @@ class MonitorApp:
                 if st and en:
                     total += _dur_ms(st, en)
             return total
+
+        def _auto_end_session(reason: str = "auto_stop") -> Dict:
+            """Automatically end the current work session with a reason"""
+            if not self._work_session or self._work_session.get('end_ts'):
+                return {"ok": False, "error": "No active session"}
+
+            # Close any open break
+            brks = self._work_session.get('breaks') or []
+            if brks and not brks[-1].get('end_ts'):
+                brks[-1]['end_ts'] = _now_iso()
+
+            self._work_session['end_ts'] = _now_iso()
+            start_ts = self._work_session.get('start_ts')
+            end_ts = self._work_session.get('end_ts')
+            total_ms = _dur_ms(start_ts, end_ts)
+            break_ms = _sum_break_ms(brks)
+            work_ms = max(0, total_ms - break_ms)
+
+            rec = {
+                "emp_id": int(self.cfg.data.get('emp_id', 0)),
+                "start_ts": start_ts,
+                "end_ts": end_ts,
+                "breaks": brks,
+                "work_ms": work_ms,
+                "break_ms": break_ms,
+                "total_ms": total_ms,
+                "auto_stop_reason": reason
+            }
+            _insert_session_db(rec)
+            self._work_session = {}
+            Alerts.log(f"Session auto-stopped: {reason}")
+            return {"ok": True, "record": rec, "reason": reason}
 
         def _insert_session_db(rec: Dict):
             try:
@@ -1410,8 +3078,25 @@ class MonitorApp:
         @app.post('/session/start')
         def api_session_start():
             try:
+                # Check if there's an existing active session
                 if (self._work_session or {}).get('start_ts') and not self._work_session.get('end_ts'):
-                    return jsonify({"ok": False, "error": "Session already active"}), 400
+                    # Check if session is stale (older than 24 hours)
+                    try:
+                        start_ts = dt.datetime.fromisoformat(self._work_session.get('start_ts'))
+                        age_hours = (dt.datetime.now() - start_ts).total_seconds() / 3600
+
+                        if age_hours > 24:
+                            # Stale session - clear it
+                            Alerts.log(f"Clearing stale session from {self._work_session.get('start_ts')} (age: {age_hours:.1f}h)")
+                            self._work_session = {}
+                        else:
+                            # Recent active session - return existing
+                            return jsonify({"ok": True, "state": self._work_session, "already_active": True})
+                    except Exception as e:
+                        Alerts.log(f"Error checking session age: {e}, creating new session")
+                        self._work_session = {}
+
+                # Create new session
                 self._work_session = {"start_ts": _now_iso(), "end_ts": None, "breaks": [], "status": "active"}
                 return jsonify({"ok": True, "state": self._work_session})
             except Exception as e:
@@ -1588,6 +3273,39 @@ class MonitorApp:
             except Exception as e:
                 Alerts.log(f"/geo/refresh error: {e}")
                 return jsonify({"ok": False}), 500
+
+        @app.post('/app/quit')
+        def app_quit_notification():
+            """Notify admin when employee quits the app"""
+            try:
+                data = request.get_json() or {}
+
+                # Get current work session info
+                work_info = {
+                    "reason": data.get('reason', 'user_action'),
+                    "work_session_active": False
+                }
+
+                # Check if there was an active work session
+                work = self._work_session or {}
+                if work and not work.get('end_ts'):
+                    work_info["work_session_active"] = True
+                    work_info["session_start"] = work.get('start_ts')
+                    if work.get('start_ts'):
+                        try:
+                            work_info["session_duration_minutes"] = int(
+                                (dt.datetime.now() - dt.datetime.fromisoformat(work.get('start_ts'))).total_seconds() / 60
+                            )
+                        except Exception:
+                            work_info["session_duration_minutes"] = 0
+
+                # Send admin notification
+                send_admin_notification('app_quit', work_info, self.cfg)
+
+                return jsonify({"ok": True})
+            except Exception as e:
+                Alerts.log(f"/app/quit notification error: {e}")
+                return jsonify({"ok": False, "error": str(e)}), 500
 
         @app.route('/api/screenshots', methods=['GET'])
         def api_screenshots():
@@ -1849,8 +3567,11 @@ class IngestionBuffer:
     def flush(self, force: bool = False):
         if not self.buf and not force:
             return
-        mode = self.app.cfg.data.get('ingestion', {}).get('mode', 'file')
-        if mode == 'file':
+        ing_cfg = self.app.cfg.data.get('ingestion', {})
+        mode = ing_cfg.get('mode', 'file')
+        direct = bool(ing_cfg.get('direct_write', False))
+        # If not direct_write, always fall back to file-based buffering; periodic sync will handle Postgres
+        if mode == 'file' or (mode == 'postgres' and not direct):
             today = dt.datetime.now().strftime('%Y-%m-%d')
             hb_path = os.path.join(HEARTBEAT_DIR, f'heartbeat_{today}.jsonl')
             try:
@@ -1859,6 +3580,45 @@ class IngestionBuffer:
                         f.write(json.dumps(rec) + "\n")
             except Exception as e:
                 Alerts.log(f"Ingestion flush error: {e}")
+            # Also insert into local SQLite so periodic sync can push to Postgres
+            try:
+                emp_id = int(self.app.cfg.data.get('emp_id', 0))
+                for rec in self.buf:
+                    cur = rec.get('current') or {}
+                    url = cur.get('url') or ''
+                    # derive domain similar to Postgres path
+                    try:
+                        p = urlparse(url)
+                        dom = (p.netloc or '').split('@')[-1]
+                        dom = dom.split(':')[0]
+                        dom = dom.lower()
+                        if dom.startswith('www.'):
+                            dom = dom[4:]
+                    except Exception:
+                        dom = ''
+                    batt = rec.get('battery') or {}
+                    self.app.local_storage.insert_heartbeat(
+                        emp_id=emp_id,
+                        ts=rec.get('ts'),
+                        status=(cur.get('status') or None),
+                        cpu_percent=float(rec.get('cpu_percent') or 0.0),
+                        memory_percent=float(rec.get('mem_percent') or 0.0),
+                        process_name=(cur.get('process') or 'unknown'),
+                        window_title=(cur.get('window') or ''),
+                        domain=(dom or None),
+                        url=(url or None),
+                        battery_level=batt.get('percent'),
+                        battery_plugged=batt.get('power_plugged'),
+                        geo=rec.get('geo') or None,
+                    )
+            except Exception as e:
+                Alerts.log(f"Local heartbeat insert error: {e}")
+            # Trigger a single sync check for heartbeats after batch insert
+            try:
+                if hasattr(self.app, 'local_storage'):
+                    self.app.local_storage.check_sync_needed(data_type='heartbeat')
+            except Exception as e:
+                Alerts.log(f"Heartbeat sync trigger error: {e}")
         elif mode == 'postgres':
             if psycopg is None:
                 Alerts.log(f"psycopg (v3) not installed; cannot ingest to Postgres. Falling back to file. detail={PSYCOPG_IMPORT_ERROR}")
@@ -1892,8 +3652,8 @@ class IngestionBuffer:
                             (cur.get('status') or None),
                             float(rec.get('cpu_percent') or 0.0),
                             float(rec.get('mem_percent') or 0.0),
-                            (cur.get('process') or None),
-                            (cur.get('window') or None),
+                            (cur.get('process') or 'unknown'),
+                            (cur.get('window') or ''),
                             (dom or None),
                             (url or None),
                             batt.get('percent'),
@@ -2034,6 +3794,128 @@ class NotificationManager(threading.Thread):
     def stop(self):
         self.stop_event.set()
 
+class WorkSessionMonitor(threading.Thread):
+    """Monitors active work sessions for automatic limits and shutdowns"""
+    MAX_WORK_DURATION_MS = 24 * 60 * 60 * 1000  # 24 hours in milliseconds
+    INACTIVITY_THRESHOLD_SEC = 300  # 5 minutes of inactivity treated as potential shutdown/sleep
+
+    def __init__(self, app_ref: 'MonitorApp'):
+        super().__init__(daemon=True)
+        self.app = app_ref
+        self.stop_event = threading.Event()
+        self.last_day = dt.datetime.now().day
+        self.last_activity_check = time.time()
+        self.inactive_break_start = None
+
+    def _notify(self, title: str, message: str):
+        """Send notification to user"""
+        try:
+            if self.app._notifier:
+                self.app._notifier._notify(title, message)
+        except Exception as e:
+            Alerts.log(f"Notification error: {e}")
+
+    def run(self):
+        while not self.stop_event.is_set():
+            try:
+                now = dt.datetime.now()
+                session = self.app._work_session
+
+                # Check if there's an active session
+                if session and session.get('start_ts') and not session.get('end_ts'):
+                    start_dt = dt.datetime.fromisoformat(session['start_ts'])
+                    duration_ms = int((now - start_dt.replace(tzinfo=None)).total_seconds() * 1000)
+
+                    # Calculate work duration (total - breaks)
+                    breaks = session.get('breaks', [])
+                    break_ms = 0
+                    for br in breaks:
+                        if br.get('start_ts') and br.get('end_ts'):
+                            br_start = dt.datetime.fromisoformat(br['start_ts'])
+                            br_end = dt.datetime.fromisoformat(br['end_ts'])
+                            break_ms += int((br_end - br_start).total_seconds() * 1000)
+
+                    work_ms = duration_ms - break_ms
+
+                    # Check 1: 24-hour work limit exceeded
+                    if work_ms >= self.MAX_WORK_DURATION_MS:
+                        Alerts.log("Work session exceeded 24 hours, auto-stopping")
+                        self._notify("Work Limit Reached",
+                                   "Your work session has reached the 24-hour limit and has been automatically stopped.")
+                        # Call the Flask app's auto-end function through direct method
+                        # We need to invoke this through the app context
+                        try:
+                            with self.app.flask_app.app_context():
+                                from flask import Flask, jsonify
+                                # Import the _auto_end_session closure from start_server scope
+                                # Since we can't access the closure, we'll call the endpoint internally
+                                pass
+                        except:
+                            pass
+                        # Instead, directly manipulate the session
+                        self.app._work_session['end_ts'] = dt.datetime.now(dt.timezone.utc).isoformat()
+                        self._notify("Timer Auto-Stopped", "Work timer stopped due to 24-hour work limit.")
+
+                    # Check 2: Midnight rollover - auto-stop at midnight
+                    if now.day != self.last_day and now.hour == 0 and now.minute < 1:
+                        Alerts.log("Midnight detected, auto-stopping work session")
+                        self._notify("Midnight Auto-Stop",
+                                   "Your work session has been automatically stopped at midnight.")
+                        self.app._work_session['end_ts'] = dt.datetime.now(dt.timezone.utc).isoformat()
+
+                # Update last day tracker
+                self.last_day = now.day
+
+                # Check 3: Inactivity detection (shutdown/sleep) - auto-create break
+                if session and session.get('start_ts') and not session.get('end_ts'):
+                    current_time = time.time()
+                    # Check if system has been inactive
+                    if hasattr(self.app, 'activity'):
+                        total_activity = self.app.activity.total_clicks + self.app.activity.total_keys
+                        # Initialize if first check
+                        if not hasattr(self, 'last_total_activity'):
+                            self.last_total_activity = total_activity
+                            self.last_activity_check = current_time
+
+                        # Check if no activity in the threshold period
+                        time_since_check = current_time - self.last_activity_check
+                        activity_delta = total_activity - self.last_total_activity
+
+                        if activity_delta == 0 and time_since_check >= self.INACTIVITY_THRESHOLD_SEC:
+                            # No activity detected - system might have been shut down/sleeping
+                            if not self.inactive_break_start:
+                                # Start an automatic break for the inactivity period
+                                self.inactive_break_start = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=self.INACTIVITY_THRESHOLD_SEC)
+                                Alerts.log(f"Inactivity detected - starting automatic break")
+                        elif activity_delta > 0:
+                            # Activity resumed
+                            if self.inactive_break_start:
+                                # End the automatic break
+                                breaks = session.setdefault('breaks', [])
+                                # Check if last break is still open or create new one
+                                if not breaks or breaks[-1].get('end_ts'):
+                                    # Add a new break entry for the inactive period
+                                    breaks.append({
+                                        "start_ts": self.inactive_break_start.isoformat(),
+                                        "end_ts": dt.datetime.now(dt.timezone.utc).isoformat(),
+                                        "reason": "auto_inactivity"
+                                    })
+                                    Alerts.log(f"Automatic break added for inactivity period")
+                                self.inactive_break_start = None
+
+                            # Update tracking variables
+                            self.last_total_activity = total_activity
+                            self.last_activity_check = current_time
+
+            except Exception as e:
+                Alerts.log(f"WorkSessionMonitor error: {e}")
+
+            # Check every 30 seconds
+            time.sleep(30)
+
+    def stop(self):
+        self.stop_event.set()
+
 class ITSMHelper(threading.Thread):
     """Monitors system health and performs AI-inspired ITSM assistance and self-healing."""
     def __init__(self, app_ref: 'MonitorApp'):
@@ -2042,8 +3924,23 @@ class ITSMHelper(threading.Thread):
         self.stop_event = threading.Event()
         self.high_cpu_since: Optional[float] = None
         self.prev_running: set = set()
+        self.last_ticket_ts: Dict[str, float] = {}  # Track last ticket timestamp per issue type
 
     def _create_ticket(self, issue_type: str, severity: str, details: Dict, actions_taken: Optional[List[str]] = None):
+        # Check cooldown to prevent duplicate tickets
+        cfg = self.app.cfg.data.get('itsm', {})
+        cooldowns = cfg.get('cooldowns', {})
+        cooldown_sec = cooldowns.get(issue_type, 600)  # Default 10 min cooldown
+
+        now = time.time()
+        last_ts = self.last_ticket_ts.get(issue_type, 0)
+
+        if (now - last_ts) < cooldown_sec:
+            # Still in cooldown period, skip creating ticket
+            Alerts.log(f"ITSM ticket suppressed (cooldown): {issue_type}")
+            return
+
+        # Create ticket
         ticket = {
             "id": f"TKT-{int(time.time())}",
             "ts": dt.datetime.now().isoformat(timespec='seconds'),
@@ -2053,6 +3950,8 @@ class ITSMHelper(threading.Thread):
             "actions_taken": actions_taken or [],
             "status": "open"
         }
+
+        # Save to JSON file
         try:
             with open(ITSM_TICKETS_JSON, 'r', encoding='utf-8') as f:
                 tickets = json.load(f)
@@ -2061,6 +3960,53 @@ class ITSMHelper(threading.Thread):
         tickets.append(ticket)
         with open(ITSM_TICKETS_JSON, 'w', encoding='utf-8') as f:
             json.dump(tickets, f, indent=2)
+
+        # Save to PostgreSQL database
+        try:
+            ing = self.app.cfg.data.get('ingestion', {})
+            if ing.get('mode') == 'postgres' and psycopg is not None:
+                db_cfg = ing.get('db', {})
+                dsn = (db_cfg.get('url') or '').strip() or os.environ.get(db_cfg.get('url_env', 'EMP_DB_URL'))
+                if dsn:
+                    schema = db_cfg.get('schema', 'employee_monitor')
+                    emp_id = int(self.app.cfg.data.get('emp_id', 0))
+
+                    with psycopg.connect(dsn) as conn:
+                        with conn.cursor() as cur:
+                            # Create ITSM tickets table if not exists
+                            cur.execute(f"""
+                                CREATE TABLE IF NOT EXISTS {schema}.itsm_tickets (
+                                    id VARCHAR(50) PRIMARY KEY,
+                                    emp_id INTEGER NOT NULL,
+                                    ts TIMESTAMPTZ NOT NULL,
+                                    type VARCHAR(50) NOT NULL,
+                                    severity VARCHAR(20) NOT NULL,
+                                    details JSONB,
+                                    actions_taken JSONB,
+                                    status VARCHAR(20) DEFAULT 'open',
+                                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                                )
+                            """)
+
+                            # Insert ticket
+                            cur.execute(f"""
+                                INSERT INTO {schema}.itsm_tickets
+                                (id, emp_id, ts, type, severity, details, actions_taken, status)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                ON CONFLICT (id) DO NOTHING
+                            """, (
+                                ticket['id'], emp_id, ticket['ts'], ticket['type'],
+                                ticket['severity'], json.dumps(ticket['details']),
+                                json.dumps(ticket['actions_taken']), ticket['status']
+                            ))
+                            conn.commit()
+                            Alerts.log(f"ITSM ticket saved to database: {ticket['id']}")
+        except Exception as e:
+            Alerts.log(f"Failed to save ITSM ticket to database: {e}")
+
+        # Update last ticket timestamp
+        self.last_ticket_ts[issue_type] = now
+
         # optional webhook
         try:
             wh = self.app.cfg.data.get('itsm', {}).get('ticket_webhook')
