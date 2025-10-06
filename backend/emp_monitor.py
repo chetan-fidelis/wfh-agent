@@ -45,8 +45,16 @@ except ImportError:
         def insert_wellness(self, *args, **kwargs):
             pass
 
+# Import API sync module
+try:
+    from api_sync import APISync
+    API_SYNC_AVAILABLE = True
+except ImportError:
+    API_SYNC_AVAILABLE = False
+
 # Third-party deps
 from flask import Flask, send_file, jsonify, Response, request
+from werkzeug.utils import secure_filename
 import psutil
 try:
     from waitress import serve
@@ -135,6 +143,7 @@ HEARTBEAT_DIR = os.path.join(DATA_DIR, 'heartbeats')
 ITSM_TICKETS_JSON = os.path.join(DATA_DIR, 'itsm_tickets.json')
 ESG_DIR = os.path.join(DATA_DIR, 'esg')
 SHOTS_DIR = os.path.join(DATA_DIR, 'shots')
+UPLOAD_BASE_DIR = os.environ.get('SCREENSHOT_UPLOAD_DIR', os.path.join(DATA_DIR, 'uploads'))
 
 SESSION_DURATION_SEC = 5 * 60  # 5 minutes
 SCREEN_FPS = 1  # 1 frame per second
@@ -429,7 +438,18 @@ class LocalStorage:
         
         conn.commit()
         conn.close()
-        
+
+        # Initialize API sync if enabled
+        self.api_sync = None
+        if API_SYNC_AVAILABLE and self.app_ref:
+            ing_cfg = self.app_ref.cfg.data.get('ingestion', {})
+            if ing_cfg.get('mode') == 'api':
+                try:
+                    self.api_sync = APISync(self.db_path, self.app_ref.cfg.data, self.app_ref)
+                    self.log("API sync initialized")
+                except Exception as e:
+                    self.log(f"Failed to initialize API sync: {e}")
+
         if self.app_ref:
             self.log("SQLite database initialized")
     
@@ -734,8 +754,62 @@ class LocalStorage:
             self.last_sync = now
     
     def sync_to_postgres(self, tables_to_sync=None):
-        """Sync all unsynced data to Postgres
-        
+        """Sync data using configured method (API or direct PostgreSQL)
+
+        Args:
+            tables_to_sync: Optional list of tables to sync. If None, sync all tables.
+        """
+        # Check if we should use API sync
+        if self.api_sync:
+            return self._sync_via_api()
+
+        # Otherwise use existing direct PostgreSQL sync
+        return self._sync_direct_postgres(tables_to_sync)
+
+    def _sync_via_api(self):
+        """Sync data via API server"""
+        if not self.sync_lock.acquire(blocking=False):
+            self.log("Sync already in progress, skipping")
+            return
+
+        try:
+            emp_id = self.app_ref.cfg.data.get('emp_id', 0)
+            if emp_id == 0:
+                self.log("No employee ID configured, skipping sync")
+                return
+
+            # Get data file paths
+            data_dir = os.path.join(self.data_dir, '..', 'monitor_data')
+            sessions_file = os.path.join(data_dir, 'work_sessions.json')
+            usage_file = os.path.join(data_dir, 'website_usage.json')
+            productivity_file = os.path.join(data_dir, 'usage.json')
+            wellness_file = os.path.join(data_dir, 'wellness.json')
+            tickets_file = os.path.join(data_dir, 'itsm_tickets.json')
+            timeline_file = os.path.join(data_dir, 'timeline.json')
+
+            # Sync all data
+            results = self.api_sync.sync_all(
+                emp_id,
+                sessions_file=sessions_file,
+                usage_file=usage_file,
+                productivity_file=productivity_file,
+                wellness_file=wellness_file,
+                tickets_file=tickets_file,
+                timeline_file=timeline_file
+            )
+
+            for data_type, count in results.items():
+                if count > 0:
+                    self.log(f"API sync: {count} {data_type} records")
+
+        except Exception as e:
+            self.log(f"API sync error: {e}")
+        finally:
+            self.sync_lock.release()
+
+    def _sync_direct_postgres(self, tables_to_sync=None):
+        """Sync all unsynced data to Postgres (direct connection)
+
         Args:
             tables_to_sync: Optional list of tables to sync. If None, sync all tables.
         """
@@ -743,15 +817,15 @@ class LocalStorage:
         if not self.sync_lock.acquire(blocking=False):
             self.log("Sync already in progress, skipping")
             return
-        
+
         try:
             self.log(f"Starting sync to Postgres... Tables: {tables_to_sync or 'ALL'}")
-            
+
             # Get app reference for Postgres connection
             if not self.app_ref:
                 self.log("No app reference available for Postgres sync")
                 return
-            
+
             # Check if Postgres is enabled
             ing = self.app_ref.cfg.data.get('ingestion', {})
             if ing.get('mode') != 'postgres':
@@ -1351,6 +1425,7 @@ class ScreenRecorder(threading.Thread):
         except Exception:
             pass
 
+
 class ScheduledShooter(threading.Thread):
     """Takes a small number of screenshots per day at random times within office hours when active and on workdays."""
     def __init__(self, app_ref: 'MonitorApp'):
@@ -1417,20 +1492,41 @@ class ScheduledShooter(threading.Thread):
     def _upload_screenshot(self, file_path: str, timestamp: str):
         """Upload screenshot to server if configured and store metadata in database"""
         try:
-            # Store in database if using Postgres
+            emp_id = int(self.app.cfg.data.get('emp_id', 0))
+            if not emp_id:
+                return
+
+            # Get file info
+            file_size = os.path.getsize(file_path)
+            file_name = os.path.basename(file_path)
+            captured_at = dt.datetime.strptime(timestamp, '%Y%m%d_%H%M%S').isoformat()
+
+            # Store metadata in local SQLite first
+            if self.app.local_storage:
+                self.app.local_storage.insert_screenshot(emp_id, file_name, file_path, file_size, captured_at)
+
+            # Check ingestion mode for upload
             ing = self.app.cfg.data.get('ingestion', {})
+
+            # If using API mode, upload via API sync
+            if ing.get('mode') == 'api' and self.app.local_storage and self.app.local_storage.api_sync:
+                try:
+                    success = self.app.local_storage.api_sync.upload_screenshot(emp_id, file_path, captured_at)
+                    if success and self.app.local_storage:
+                        # Update upload status in local storage
+                        self.app.local_storage.update_screenshot_upload(emp_id, file_name, f"api://{file_name}")
+                    return
+                except Exception as e:
+                    Alerts.log(f"API screenshot upload error: {e}")
+                    # Fall through to legacy upload method if API fails
+
+            # Store in database if using direct Postgres
             if ing.get('mode') == 'postgres' and psycopg is not None:
                 db_cfg = ing.get('db', {})
                 dsn = (db_cfg.get('url') or '').strip() or os.environ.get(db_cfg.get('url_env', 'EMP_DB_URL'))
                 if dsn:
                     schema = db_cfg.get('schema', 'employee_monitor')
-                    emp_id = int(self.app.cfg.data.get('emp_id', 0))
-                    
-                    # Get file info
-                    file_size = os.path.getsize(file_path)
-                    file_name = os.path.basename(file_path)
-                    captured_at = dt.datetime.strptime(timestamp, '%Y%m%d_%H%M%S')
-                    
+
                     with psycopg.connect(dsn) as conn:
                         with conn.cursor() as cur:
                             # Create screenshots table if not exists
@@ -1448,10 +1544,10 @@ class ScheduledShooter(threading.Thread):
                                     UNIQUE (emp_id, file_name)
                                 )
                             """)
-                            
+
                             # Insert screenshot metadata
                             cur.execute(f"""
-                                INSERT INTO {schema}.screenshots 
+                                INSERT INTO {schema}.screenshots
                                 (emp_id, file_name, file_path, file_size, captured_at)
                                 VALUES (%s, %s, %s, %s, %s)
                                 ON CONFLICT (emp_id, file_name) DO UPDATE SET
@@ -1460,11 +1556,11 @@ class ScheduledShooter(threading.Thread):
                                     captured_at = EXCLUDED.captured_at,
                                     created_at = NOW()
                             """, (emp_id, file_name, file_path, file_size, captured_at))
-                            
+
                             conn.commit()
                             Alerts.log(f"Screenshot metadata saved to database: {file_name}")
-            
-            # Also upload to server if configured
+
+            # Also upload to server if configured (legacy method)
             upload_cfg = self.app.cfg.data.get('screenshot_upload', {})
             if not upload_cfg.get('enabled', False):
                 return
@@ -1657,6 +1753,7 @@ class Heartbeat(threading.Thread):
                         pass
         except Exception:
             pass
+
 
 class InputActivity:
     """Cross-platform input activity tracking with Python 3.13 support"""
@@ -2323,6 +2420,7 @@ class DomainBlocker(threading.Thread):
         self.stop_event.set()
 
 
+# Standalone utility functions
 def collect_devices_info():
     info = {
         "hostname": socket.gethostname(),
@@ -2416,7 +2514,7 @@ Details:
 
                 # Send email
                 server = smtplib.SMTP(email_cfg.get('smtp_server', 'smtp.gmail.com'),
-                                     email_cfg.get('smtp_port', 587))
+                                    email_cfg.get('smtp_port', 587))
                 server.starttls()
                 server.login(email_cfg.get('username', ''), email_cfg.get('password', ''))
                 server.send_message(msg)
@@ -2428,6 +2526,7 @@ Details:
 
     except Exception as e:
         Alerts.log(f"Admin notification error: {e}")
+
 
 def compute_wellness(timeline_path: str = TIMELINE_JSON, cfg: Optional['Config'] = None) -> Dict:
     """Compute daily wellness with thresholds and flags; optionally bound to work hours."""
@@ -2556,8 +2655,8 @@ def compute_wellness(timeline_path: str = TIMELINE_JSON, cfg: Optional['Config']
                                 cur.execute(f"""
                                     INSERT INTO {schema}.wellness 
                                     (emp_id, date, active_secs, idle_secs, offline_secs, work_secs, 
-                                     active_ratio, idle_ratio, utilization_percent, underutilized, 
-                                     overburdened, burnout_risk, steady_performer, last_updated)
+                                    active_ratio, idle_ratio, utilization_percent, underutilized, 
+                                    overburdened, burnout_risk, steady_performer, last_updated)
                                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                                     ON CONFLICT (emp_id, date) DO UPDATE SET
                                         active_secs = EXCLUDED.active_secs,
@@ -2853,6 +2952,39 @@ class MonitorApp:
         port = port or 5050
         Alerts.log(f"Starting HTTP server on {host}:{port}")
 
+        # Optional API key for server-side ingestion endpoints
+        INGEST_API_KEY = os.environ.get('INGEST_API_KEY', '').strip()
+
+        # Helpers for screenshot uploads
+        ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png'}
+        MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+
+        def _allowed_file(filename: str) -> bool:
+            return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+        def _validate_file_size(file_storage) -> bool:
+            try:
+                pos = file_storage.stream.tell()
+            except Exception:
+                pos = 0
+            try:
+                file_storage.stream.seek(0, os.SEEK_END)
+                size = file_storage.stream.tell()
+                file_storage.stream.seek(pos)
+                return size <= MAX_FILE_SIZE
+            except Exception:
+                # If we cannot determine size reliably, accept and rely on server limits
+                return True
+
+        def _require_api_key():
+            if not INGEST_API_KEY:
+                return True
+            try:
+                hdr = request.headers.get('X-Api-Key', '')
+                return hdr == INGEST_API_KEY
+            except Exception:
+                return False
+
         @app.route('/status', methods=['GET'])
         def status():
             wellness = compute_wellness(cfg=self.cfg)
@@ -2923,6 +3055,14 @@ class MonitorApp:
                 "battery": battery,
                 "geo": geo,
                 "employee_id": emp_id  # Add employee ID as a separate field
+            })
+
+        @app.route('/health', methods=['GET'])
+        def health():
+            return jsonify({
+                'status': 'healthy',
+                'service': 'emp-monitor-api',
+                'timestamp': dt.datetime.now().isoformat()
             })
 
         @app.route('/latest.jpg', methods=['GET'])
@@ -3361,6 +3501,166 @@ class MonitorApp:
                 Alerts.log(f"/screenshots/{filename} error: {e}")
                 return jsonify({"error": str(e)}), 500
 
+        @app.post('/api/screenshot/capture')
+        def trigger_screenshot():
+            """Manually trigger a screenshot capture (for testing)"""
+            try:
+                if self.shooter:
+                    if self.shooter._capture_one():
+                        return jsonify({'success': True, 'message': 'Screenshot captured'}), 200
+                    else:
+                        return jsonify({'success': False, 'message': 'Failed to capture (system may be idle)'}), 400
+                else:
+                    return jsonify({'success': False, 'message': 'Screenshot feature not enabled'}), 400
+            except Exception as e:
+                return jsonify({'success': False, 'error': str(e)}), 500
+
+        @app.post('/api/upload/screenshot')
+        def upload_screenshot():
+            """Receive screenshot image and store it under uploads/screenshot/<emp_id>/<date>/"""
+            try:
+                # Optional API key
+                if not _require_api_key():
+                    return jsonify({'success': False, 'error': 'Unauthorized'}), 401
+
+                if 'screenshot' not in request.files:
+                    return jsonify({'success': False, 'error': 'No screenshot file in request'}), 400
+                file = request.files['screenshot']
+                if file.filename == '':
+                    return jsonify({'success': False, 'error': 'No file selected'}), 400
+                if not _allowed_file(file.filename):
+                    return jsonify({'success': False, 'error': f"Invalid file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"}), 400
+                if not _validate_file_size(file):
+                    return jsonify({'success': False, 'error': f'File too large. Max size: {MAX_FILE_SIZE / 1024 / 1024}MB'}), 400
+
+                emp_id = request.form.get('emp_id')
+                timestamp = request.form.get('timestamp')  # expected YYYYMMDD_HHMMSS
+                captured_at = request.form.get('captured_at')
+                if not emp_id:
+                    return jsonify({'success': False, 'error': 'emp_id is required'}), 400
+                if not timestamp:
+                    return jsonify({'success': False, 'error': 'timestamp is required'}), 400
+
+                filename = secure_filename(file.filename)
+                # Derive date folder
+                try:
+                    date_str = timestamp.split('_')[0]
+                    date_formatted = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
+                except Exception:
+                    date_formatted = dt.datetime.now().strftime('%Y-%m-%d')
+
+                # Build path and save
+                base_dir = os.path.join(UPLOAD_BASE_DIR, 'screenshot', str(emp_id), date_formatted)
+                os.makedirs(base_dir, exist_ok=True)
+                file_path = os.path.join(base_dir, filename)
+                file.save(file_path)
+
+                # Stats
+                file_size = os.path.getsize(file_path)
+                try:
+                    md5 = hashlib.md5()
+                    with open(file_path, 'rb') as fh:
+                        for chunk in iter(lambda: fh.read(4096), b''):
+                            md5.update(chunk)
+                    file_hash = md5.hexdigest()
+                except Exception:
+                    file_hash = ''
+
+                relative_path = os.path.join('screenshot', str(emp_id), date_formatted, filename).replace('\\', '/')
+                Alerts.log(f"Screenshot uploaded: {relative_path} | Size: {file_size} bytes")
+                return jsonify({
+                    'success': True,
+                    'url': relative_path,
+                    'file_name': filename,
+                    'file_size': file_size,
+                    'file_hash': file_hash,
+                    'emp_id': emp_id,
+                    'timestamp': timestamp,
+                    'captured_at': captured_at,
+                    'stored_at': dt.datetime.now().isoformat(),
+                }), 200
+            except Exception as e:
+                Alerts.log(f"upload_screenshot error: {e}")
+                return jsonify({'success': False, 'error': f'Internal server error: {str(e)}'}), 500
+
+        @app.post('/api/ingest/heartbeat')
+        def ingest_heartbeat():
+            """Ingest heartbeat batch into Postgres (server-side DSN via EMP_DB_URL)."""
+            try:
+                if not _require_api_key():
+                    return jsonify({'ok': False, 'error': 'Unauthorized'}), 401
+
+                payload = request.get_json(force=True, silent=False) or {}
+                emp_id = int(payload.get('emp_id') or 0)
+                items = payload.get('items') or []
+                if emp_id <= 0 or not isinstance(items, list) or not items:
+                    return jsonify({'ok': False, 'error': 'Invalid payload'}), 400
+
+                # Resolve DSN and schema (server holds secret)
+                ing = self.cfg.data.get('ingestion', {}) if self.cfg else {}
+                db_cfg = ing.get('db', {}) if isinstance(ing, dict) else {}
+                schema = db_cfg.get('schema', 'employee_monitor')
+                dsn = os.environ.get(db_cfg.get('url_env', 'EMP_DB_URL'))
+                if not dsn or psycopg is None:
+                    return jsonify({'ok': False, 'error': 'Database unavailable on server'}), 503
+
+                rows = []
+                for rec in items:
+                    cur = rec.get('current') or {}
+                    url = cur.get('url') or ''
+                    try:
+                        p = urlparse(url)
+                        dom = (p.netloc or '').split('@')[-1]
+                        dom = dom.split(':')[0]
+                        dom = dom.lower()
+                        if dom.startswith('www.'):
+                            dom = dom[4:]
+                    except Exception:
+                        dom = ''
+                    batt = rec.get('battery') or {}
+                    rows.append((
+                        emp_id,
+                        rec.get('ts'),
+                        (cur.get('status') or None),
+                        float(rec.get('cpu_percent') or 0.0),
+                        float(rec.get('mem_percent') or 0.0),
+                        (cur.get('process') or 'unknown'),
+                        (cur.get('window') or ''),
+                        (dom or None),
+                        (url or None),
+                        batt.get('percent'),
+                        batt.get('power_plugged'),
+                        json.dumps(rec.get('geo') or {})
+                    ))
+
+                inserted = 0
+                with psycopg.connect(dsn) as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("SET search_path TO %s, public;" % schema)
+                        if execute_values is not None:
+                            tpl = "(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+                            sql = f"""
+                                INSERT INTO {schema}.heartbeat
+                                (emp_id, ts, status, cpu_percent, memory_percent, process_name, window_title, domain, url, battery_level, battery_plugged, geo)
+                                VALUES %s
+                                ON CONFLICT (emp_id, ts) DO NOTHING
+                            """
+                            execute_values(cur, sql, rows, template=tpl)
+                            inserted = cur.rowcount or 0
+                        else:
+                            sql = f"""
+                                INSERT INTO {schema}.heartbeat
+                                (emp_id, ts, status, cpu_percent, memory_percent, process_name, window_title, domain, url, battery_level, battery_plugged, geo)
+                                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                                ON CONFLICT (emp_id, ts) DO NOTHING
+                            """
+                            cur.executemany(sql, rows)
+                            inserted = cur.rowcount or 0
+                return jsonify({'ok': True, 'inserted': inserted})
+            except Exception as e:
+                Alerts.log(f"ingest_heartbeat error: {e}")
+                return jsonify({'ok': False, 'error': str(e)}), 500
+
         @app.get('/')
         def home():
             return Response(
@@ -3421,15 +3721,18 @@ class MonitorApp:
         # Cache geo lookup: 1 hour on success; 10 minutes on failure to avoid spam
         now = time.time()
         cache_ts = self._geo_cache.get('ts', 0)
-        cached = self._geo_cache.get('data') or {}
-        if cached:
+        cached = self._geo_cache.get('data')
+
+        # Check if we have valid cached data
+        if cached and len(cached) > 0:
             # Successful data cached, honor 1 hour TTL
             if (now - cache_ts) < 3600:
                 return cached
-        else:
-            # No data (likely failure) but still respect a shorter TTL (10 min)
+        elif cache_ts > 0:
+            # Previous lookup failed (empty result), respect shorter TTL (10 min)
             if (now - cache_ts) < 600:
-                return cached
+                return cached or {}
+
         # Check config for manual override
         geo_cfg = self.cfg.data.get('geo', {}) if self.cfg else {}
         if geo_cfg.get('mode') == 'manual':
@@ -3442,7 +3745,8 @@ class MonitorApp:
             if mode == 'ip_multi':
                 data = self._geo_from_multiple_providers()
             else:
-                # Default single provider (ipapi.co)
+                # Default: Try ipapi.co first, fallback to ipwho.is on rate limit
+                Alerts.log(f"Fetching geolocation from ipapi.co...")
                 r = requests.get('https://ipapi.co/json/', timeout=5)
                 if r.ok:
                     j = r.json()
@@ -3455,6 +3759,30 @@ class MonitorApp:
                         "longitude": j.get('longitude'),
                         "org": j.get('org') or j.get('asn'),
                     }
+                    Alerts.log(f"Geolocation fetched: {data.get('city')}, {data.get('country')} (IP: {data.get('ip')})")
+                elif r.status_code == 429:
+                    # Rate limited - try fallback provider
+                    Alerts.log(f"ipapi.co rate limited (429), trying fallback provider ipwho.is...")
+                    try:
+                        r2 = requests.get('https://ipwho.is/', timeout=5)
+                        if r2.ok:
+                            j = r2.json()
+                            if j.get('success', True):
+                                conn = j.get('connection') or {}
+                                data = {
+                                    "ip": j.get('ip'),
+                                    "city": j.get('city'),
+                                    "region": j.get('region'),
+                                    "country": j.get('country') or j.get('country_name'),
+                                    "latitude": j.get('latitude'),
+                                    "longitude": j.get('longitude'),
+                                    "org": conn.get('org') or conn.get('isp'),
+                                }
+                                Alerts.log(f"Fallback geolocation fetched: {data.get('city')}, {data.get('country')} (IP: {data.get('ip')})")
+                    except Exception as e2:
+                        Alerts.log(f"Fallback geo provider failed: {e2}")
+                else:
+                    Alerts.log(f"Geo API returned status: {r.status_code}")
         except Exception as e:
             Alerts.log(f"Geo lookup failed: {e}")
         # Always cache outcome (even if empty) to honor TTL/backoff above
@@ -3619,6 +3947,43 @@ class IngestionBuffer:
                     self.app.local_storage.check_sync_needed(data_type='heartbeat')
             except Exception as e:
                 Alerts.log(f"Heartbeat sync trigger error: {e}")
+        elif mode == 'api':
+            # For API mode: save to SQLite and let APISync handle remote sync
+            try:
+                emp_id = int(self.app.cfg.data.get('emp_id', 0))
+                for rec in self.buf:
+                    cur = rec.get('current') or {}
+                    url = rec.get('url') or ''
+                    # derive domain
+                    try:
+                        p = urlparse(url)
+                        dom = (p.netloc or '').split('@')[-1]
+                        dom = dom.split(':')[0]
+                        dom = dom.lower()
+                        if dom.startswith('www.'):
+                            dom = dom[4:]
+                    except Exception:
+                        dom = ''
+                    batt = rec.get('battery') or {}
+                    self.app.local_storage.insert_heartbeat(
+                        emp_id=emp_id,
+                        ts=rec.get('ts'),
+                        status=(cur.get('status') or None),
+                        cpu_percent=float(rec.get('cpu_percent') or 0.0),
+                        memory_percent=float(rec.get('mem_percent') or 0.0),
+                        process_name=(cur.get('process') or 'unknown'),
+                        window_title=(cur.get('window') or ''),
+                        domain=(dom or None),
+                        url=(url or None),
+                        battery_level=batt.get('percent'),
+                        battery_plugged=batt.get('power_plugged'),
+                        geo=rec.get('geo') or None,
+                    )
+                # Trigger API sync via APISync (not direct API call)
+                if hasattr(self.app, 'local_storage'):
+                    self.app.local_storage.check_sync_needed(data_type='heartbeat')
+            except Exception as e:
+                Alerts.log(f"API mode heartbeat buffer error: {e}")
         elif mode == 'postgres':
             if psycopg is None:
                 Alerts.log(f"psycopg (v3) not installed; cannot ingest to Postgres. Falling back to file. detail={PSYCOPG_IMPORT_ERROR}")
@@ -3794,6 +4159,7 @@ class NotificationManager(threading.Thread):
     def stop(self):
         self.stop_event.set()
 
+
 class WorkSessionMonitor(threading.Thread):
     """Monitors active work sessions for automatic limits and shutdowns"""
     MAX_WORK_DURATION_MS = 24 * 60 * 60 * 1000  # 24 hours in milliseconds
@@ -3871,7 +4237,7 @@ class WorkSessionMonitor(threading.Thread):
                     current_time = time.time()
                     # Check if system has been inactive
                     if hasattr(self.app, 'activity'):
-                        total_activity = self.app.activity.total_clicks + self.app.activity.total_keys
+                        total_activity = self.app.activity.mouse_clicks + self.app.activity.key_presses
                         # Initialize if first check
                         if not hasattr(self, 'last_total_activity'):
                             self.last_total_activity = total_activity
@@ -3915,6 +4281,7 @@ class WorkSessionMonitor(threading.Thread):
 
     def stop(self):
         self.stop_event.set()
+
 
 class ITSMHelper(threading.Thread):
     """Monitors system health and performs AI-inspired ITSM assistance and self-healing."""
@@ -4153,7 +4520,7 @@ def main():
     parser = argparse.ArgumentParser(description='Employee Monitor System')
     parser.add_argument('--serve', action='store_true', help='Start HTTP livestream server')
     parser.add_argument('--host', default='127.0.0.1')
-    parser.add_argument('--port', type=int, default=5000)
+    parser.add_argument('--port', type=int, default=5050)
     args = parser.parse_args()
 
     app = MonitorApp()
