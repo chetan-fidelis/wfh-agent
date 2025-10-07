@@ -10,7 +10,16 @@
       "Bash(python:*)",
       "Bash(tasklist:*)",
       "Bash(tasklist.exe)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(cat:*)",
+      "Bash(pyinstaller:*)",
+      "Read(//c/Users/techs/AppData/Roaming/wfh-agent-desktop/**)",
+      "Bash(ssh root@20.197.8.101 \"cat /home/wfhagent/.env | grep API_KEY\")",
+      "Bash(copy:*)",
+      "Bash(npm run build:backend:*)",
+      "Read(//tmp/monitor_data/**)",
+      "Bash(npm install)",
+      "Bash(where electron)"
     ],
     "deny": [],
     "ask": []

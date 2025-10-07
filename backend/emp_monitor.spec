@@ -20,7 +20,8 @@ a = Analysis(
         'win10toast',
         'winsdk',
         'psycopg',
-        'uiautomation'
+        'uiautomation',
+        'api_sync'
     ],
     hookspath=[],
     hooksconfig={},

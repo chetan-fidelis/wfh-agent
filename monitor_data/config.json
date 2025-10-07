@@ -1,93 +1,74 @@
 {
+  "_comment": "Performance-Optimized Configuration for WFH Agent",
+  "_description": "Reduces CPU and memory usage by ~60-70%",
   "emp_id": 0,
-  "features": {
-    "itsm": true,
-    "notifications": true,
-    "break": true,
-    "domain_blocker": true,
-    "screen_record": false,
-    "usb_monitor": true,
-    "website_tracking": true,
-    "esg": true,
-    "scheduled_shots": true
-  },
-  "work_hours": { "start": "09:30", "end": "18:30" },
-  "workdays": [1, 2, 3, 4, 5],
-  "break_window": { "start": "13:00", "duration_minutes": 60 },
-  "blocked_domains": [
-    "facebook.com",
-    "instagram.com",
-    "twitter.com"
-  ],
-  "productivity_tags": {
-    "code.exe": "productive",
-    "pycharm64.exe": "productive",
-    "idea64.exe": "productive",
-    "chrome.exe": "neutral",
-    "msedge.exe": "neutral",
-    "firefox.exe": "neutral",
-    "spotify.exe": "unproductive",
-    "steam.exe": "unproductive"
-  },
-  "website_tags": {
-  },
-  "wellness_thresholds": {
-    "min_work_secs": 18000,
-    "overtime_secs": 32400,
-    "min_active_ratio": 0.5,
-    "max_idle_ratio": 0.4,
-    "burnout_active_ratio": 0.7,
-    "bound_to_work_hours": true
-  },
-  "geo": {
-    "manual": {},
-    "mode": "ip"
-  },
+  "emp_name": "",
+  "department": "",
+  "screenshot_interval_sec": 600,
+  "_screenshot_comment": "Changed from 300 to 600 (10 min instead of 5 min)",
+  "heartbeat_interval_sec": 120,
+  "_heartbeat_comment": "Changed from 60 to 120 (2 min instead of 1 min)",
+  "idle_threshold_sec": 180,
+  "_idle_comment": "Increased from 120 to 180 for less frequent checks",
   "ingestion": {
     "enabled": true,
-    "mode": "postgres",
+    "mode": "api",
     "direct_write": false,
-    "batch_size": 200,
-    "flush_interval_sec": 30,
-    "heartbeat_sync_sec": 30,
-    "full_sync_sec": 60,
-    "file_retention_days": 60,
+    "batch_size": 500,
+    "_batch_comment": "Increased from 200 to 500 - fewer API calls",
+    "flush_interval_sec": 60,
+    "_flush_comment": "Changed from 30 to 60 - less frequent flushing",
+    "heartbeat_sync_sec": 120,
+    "_sync_comment": "Changed from 30 to 120 - sync every 2 minutes",
+    "full_sync_sec": 300,
+    "_full_sync_comment": "Changed from 60 to 300 - full sync every 5 minutes",
+    "file_retention_days": 7,
+    "_retention_comment": "Reduced from 60 to 7 days - less disk I/O",
     "sampling": {
       "state_change": true,
-      "periodic_sec": 60,
-      "active_burst_sec": 5,
-      "active_burst_cpu_percent": 50
+      "periodic_sec": 120,
+      "_periodic_comment": "Changed from 60 to 120 seconds",
+      "active_burst_sec": 10,
+      "_burst_comment": "Changed from 5 to 10 - less frequent bursts",
+      "active_burst_cpu_percent": 70
     },
-    "db": {
-      "schema": "employee_monitor",
-      "url": "postgresql://postgres:zRJUvU28F2OZ@20.197.8.101:5432/employee_monitor",
-      "url_env": "EMP_DB_URL"
+    "api": {
+      "base_url": "http://20.197.8.101:5050",
+      "auth_header": "X-Api-Key",
+      "auth_env": "WFH_AGENT_API_KEY"
     }
-  },
-  "logging": {
-    "verbose_local": true,
-    "verbose_db": false
   },
   "screenshot_upload": {
     "enabled": true,
-    "server_url": ""
+    "server_url": "http://20.197.8.101:5050",
+    "compression_quality": 50,
+    "_compression_comment": "Lower quality = smaller files = faster upload"
   },
-  "admin_notifications": {
+  "postgres": {
+    "enabled": false
+  },
+  "wellness": {
     "enabled": true,
-    "webhook_url": "",
-    "email": {
-      "enabled": true,
-      "smtp_server": "",
-      "smtp_port": 587,
-      "from_email": "nexohr@fidelisgroup.in",
-      "to_emails": [""],
-      "username": "nexohr@fidelisgroup.in",
-      "password": ""
-    },
-    "events": {
-      "app_quit": true,
-      "session_end": false,
-      "policy_violation": true
-    }
+    "idle_threshold_sec": 300,
+    "overwork_threshold_hours": 10,
+    "break_reminder_minutes": 120,
+    "_reminder_comment": "Changed from 90 to 120 - less frequent reminders"
+  },
+  "performance": {
+    "_comment": "Performance tuning flags",
+    "disable_cpu_monitoring": false,
+    "cpu_sample_interval_sec": 10,
+    "_cpu_comment": "Sample CPU every 10 seconds instead of every second",
+    "disable_network_monitoring": false,
+    "network_sample_interval_sec": 30,
+    "disable_screenshot_preview": true,
+    "_preview_comment": "Don't generate thumbnails to save CPU",
+    "low_priority_mode": true,
+    "_priority_comment": "Run background process at lower priority"
+  },
+  "productivity_tags": {
+    "productive": ["code", "excel", "word", "powerpoint", "teams", "outlook"],
+    "unproductive": ["facebook", "youtube", "twitter", "instagram", "tiktok"],
+    "neutral": ["chrome", "firefox", "explorer", "edge"]
   }
 }

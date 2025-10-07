@@ -1,6 +1,6 @@
 {
   "name": "wfh-agent-desktop",
-  "version": "0.1.8",
+  "version": "0.1.10",
   "description": "WFH Agent Desktop (Electron)",
   "main": "main.js",
   "author": "Fidelis Technology Services Pvt. Ltd.",
@@ -28,7 +28,7 @@
   "devDependencies": {
     "@electron/packager": "^18.3.6",
     "archiver": "^7.0.1",
-    "electron": "^31.3.0",
+    "electron": "^31.7.7",
     "electron-builder": "^24.13.3",
     "electron-winstaller": "^5.1.0"
   },
@@ -36,7 +36,8 @@
     "appId": "com.fidelis.wfh.agent",
     "productName": "WFH Agent",
     "directories": {
-      "output": "dist"
+      "output": "dist",
+      "buildResources": "build"
     },
     "publish": {
       "provider": "github",

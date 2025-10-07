@@ -598,6 +598,91 @@ class APISync:
             self.log(f"Error syncing timeline: {e}")
             return 0
 
+    def sync_screenshots(self, emp_id: int) -> int:
+        """Sync unsynced screenshot files to API"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        try:
+            # Get unsynced screenshots
+            cursor.execute("""
+                SELECT id, emp_id, file_name, file_path, file_size, captured_at
+                FROM screenshots
+                WHERE emp_id = ? AND synced = 0
+                ORDER BY captured_at DESC
+                LIMIT ?
+            """, (emp_id, self.batch_size))
+
+            records = cursor.fetchall()
+            if not records:
+                return 0
+
+            uploaded = 0
+
+            for row in records:
+                (rec_id, emp_id, file_name, file_path, file_size, captured_at) = row
+
+                # Check if file exists locally
+                if not os.path.exists(file_path):
+                    self.log(f"Screenshot file not found: {file_path}")
+                    continue
+
+                # Upload file to API
+                if self._upload_screenshot_file(file_path, file_name, emp_id, captured_at):
+                    # Update synced status
+                    cursor.execute("""
+                        UPDATE screenshots
+                        SET synced = 1
+                        WHERE id = ?
+                    """, (rec_id,))
+                    uploaded += 1
+                else:
+                    self.log(f"Failed to upload screenshot: {file_name}")
+
+            conn.commit()
+            self.log(f"Uploaded {uploaded}/{len(records)} screenshot files")
+            return uploaded
+
+        except Exception as e:
+            self.log(f"Error syncing screenshots: {e}")
+            return 0
+        finally:
+            conn.close()
+
+    def _upload_screenshot_file(self, file_path: str, file_name: str, emp_id: int, captured_at: str) -> bool:
+        """Upload a single screenshot file to the API"""
+        try:
+            with open(file_path, 'rb') as f:
+                files = {'file': (file_name, f, 'image/jpeg')}
+                data = {
+                    'emp_id': emp_id,
+                    'timestamp': captured_at,
+                    'captured_at': captured_at
+                }
+
+                response = requests.post(
+                    f"{self.base_url}/api/upload/screenshot",
+                    files=files,
+                    data=data,
+                    headers={'X-Api-Key': self.api_key},
+                    timeout=self.timeout
+                )
+
+                if response.status_code == 200:
+                    result = response.json()
+                    if result.get('success'):
+                        return True
+                    else:
+                        self.log(f"Screenshot upload failed: {result.get('error', 'Unknown error')}")
+                        return False
+                else:
+                    self.log(f"Screenshot upload HTTP error: {response.status_code}")
+                    return False
+
+        except Exception as e:
+            self.log(f"Screenshot file upload error: {e}")
+            return False
+
     def sync_all(self, emp_id: int, sessions_file: str = None, usage_file: str = None,
                  productivity_file: str = None, wellness_file: str = None,
                  tickets_file: str = None, timeline_file: str = None) -> Dict[str, int]:
@@ -635,6 +720,9 @@ class APISync:
             # Sync timeline
             if timeline_file:
                 results['timeline'] = self.sync_timeline(emp_id, timeline_file)
+
+            # Sync screenshots
+            results['screenshots'] = self.sync_screenshots(emp_id)
 
             return results
 

@@ -49,8 +49,13 @@ except ImportError:
 try:
     from api_sync import APISync
     API_SYNC_AVAILABLE = True
-except ImportError:
+    print("[DEBUG] API sync module imported successfully")
+except ImportError as e:
     API_SYNC_AVAILABLE = False
+    print(f"[DEBUG] API sync import failed: {e}")
+except Exception as e:
+    API_SYNC_AVAILABLE = False
+    print(f"[DEBUG] API sync import error: {e}")
 
 # Third-party deps
 from flask import Flask, send_file, jsonify, Response, request
@@ -130,7 +135,28 @@ except Exception:
 DATA_DIR = os.path.join(os.path.dirname(__file__), '..', 'monitor_data')
 SESSIONS_DIR = os.path.join(DATA_DIR, 'sessions')
 LOGS_DIR = os.path.join(DATA_DIR, 'logs')
-CONFIG_PATH = os.path.join(DATA_DIR, 'config.json')
+# Default ingest URL fallback (can be overridden by env WFH_DEFAULT_INGEST_URL)
+DEFAULT_INGEST_URL = os.environ.get('WFH_DEFAULT_INGEST_URL', 'http://20.197.8.101:5050').rstrip('/')
+# Resolve config path with environment override and sensible fallbacks
+CONFIG_PATH = os.environ.get('WFH_CONFIG_PATH')
+if not CONFIG_PATH:
+    candidates = [
+        # Prefer per-user roaming data first (survives updates)
+        os.path.join(os.path.expanduser('~'), 'AppData', 'Roaming', 'wfh-agent-desktop', 'monitor_data', 'config.json'),
+        # Then prefer current working directory (developer runs)
+        os.path.join(os.getcwd(), 'monitor_data', 'config.json'),
+        # Finally, fall back to bundled data next to the executable
+        os.path.join(DATA_DIR, 'config.json'),
+    ]
+    for _p in candidates:
+        try:
+            if os.path.exists(_p):
+                CONFIG_PATH = _p
+                break
+        except Exception:
+            continue
+if not CONFIG_PATH:
+    CONFIG_PATH = os.path.join(DATA_DIR, 'config.json')
 DEVICES_INFO_PATH = os.path.join(DATA_DIR, 'devices.json')
 ALERTS_LOG = os.path.join(DATA_DIR, 'alerts.log')
 LATEST_JPG = os.path.join(DATA_DIR, 'latest.jpg')
@@ -258,15 +284,23 @@ DEFAULT_CONFIG = {
     ,
     "ingestion": {
         "enabled": True,
-        "mode": "postgres",             # file | postgres
+        "mode": "api",                   # api | postgres | file
         "file_retention_days": 30,       # how long to keep daily heartbeat files
         "batch_size": 200,               # max items per flush
-        "flush_interval_sec": 5,         # flush cadence
+        "flush_interval_sec": 30,        # flush cadence
+        "heartbeat_sync_sec": 30,        # how often to sync heartbeat
+        "full_sync_sec": 60,             # how often to sync all data
         "sampling": {
             "state_change": True,        # emit on status/process/url change
             "periodic_sec": 60,          # periodic snapshot interval
             "active_burst_sec": 5,       # extra sampling during active
             "active_burst_cpu_percent": 50
+        },
+        "api": {
+            "base_url": "http://20.197.8.101:5050",
+            "auth_header": "X-Api-Key",
+            "auth_env": "WFH_AGENT_API_KEY",
+            "api_key": ""                # Set during deployment
         },
         "db": {
             "url_env": "EMP_DB_URL",    # environment var holding connection string
@@ -390,6 +424,7 @@ class LocalStorage:
                 created_at TEXT NOT NULL,
                 uploaded INTEGER DEFAULT 0,
                 upload_url TEXT,
+                last_updated TEXT,
                 synced INTEGER DEFAULT 0,
                 UNIQUE (emp_id, file_name)
             )
@@ -435,20 +470,34 @@ class LocalStorage:
                 UNIQUE (emp_id, ts)
             )
         ''')
-        
+
+        # Migration: Add last_updated column to screenshots if it doesn't exist
+        try:
+            cursor.execute("SELECT last_updated FROM screenshots LIMIT 1")
+        except sqlite3.OperationalError:
+            # Column doesn't exist, add it
+            cursor.execute("ALTER TABLE screenshots ADD COLUMN last_updated TEXT")
+
         conn.commit()
         conn.close()
+
+        # ALWAYS log this before anything else
+        if self.app_ref and hasattr(self.app_ref, 'log'):
+            self.app_ref.log(f"[INIT] API_SYNC_AVAILABLE={API_SYNC_AVAILABLE}, app_ref={self.app_ref is not None}")
 
         # Initialize API sync if enabled
         self.api_sync = None
         if API_SYNC_AVAILABLE and self.app_ref:
             ing_cfg = self.app_ref.cfg.data.get('ingestion', {})
+            self.log(f"Ingestion mode: {ing_cfg.get('mode')}")
             if ing_cfg.get('mode') == 'api':
                 try:
                     self.api_sync = APISync(self.db_path, self.app_ref.cfg.data, self.app_ref)
-                    self.log("API sync initialized")
+                    self.log("API sync initialized successfully!")
                 except Exception as e:
                     self.log(f"Failed to initialize API sync: {e}")
+        elif self.app_ref:
+            self.log("API sync module import failed - using direct PostgreSQL mode")
 
         if self.app_ref:
             self.log("SQLite database initialized")
@@ -819,8 +868,6 @@ class LocalStorage:
             return
 
         try:
-            self.log(f"Starting sync to Postgres... Tables: {tables_to_sync or 'ALL'}")
-
             # Get app reference for Postgres connection
             if not self.app_ref:
                 self.log("No app reference available for Postgres sync")
@@ -831,6 +878,9 @@ class LocalStorage:
             if ing.get('mode') != 'postgres':
                 self.log("Postgres sync not enabled in config")
                 return
+
+            # Only log start after we've confirmed postgres mode is enabled
+            self.log(f"Starting sync to Postgres... Tables: {tables_to_sync or 'ALL'}")
             
             # Import psycopg here to avoid circular imports
             try:
@@ -1322,15 +1372,78 @@ class Config:
         self._load()
 
     def _load(self):
+        # Prefer user config if current path is the PyInstaller temp bundle
+        appdata_cfg = os.path.join(os.path.expanduser('~'), 'AppData', 'Roaming', 'wfh-agent-desktop', 'monitor_data', 'config.json')
+        running_from_temp = bool(self.path and ('_MEI' in self.path or 'Temp' in self.path) and ('monitor_data' in self.path))
+        try:
+            if running_from_temp and os.path.exists(appdata_cfg):
+                self.path = appdata_cfg
+                Alerts.log(f"[CONFIG] Switched to user config at: {self.path}")
+        except Exception:
+            pass
+        Alerts.log(f"[CONFIG] Loading config from: {self.path}")
         if os.path.exists(self.path):
             try:
                 with open(self.path, 'r', encoding='utf-8') as f:
                     on_disk = json.load(f)
                 # merge shallow
                 self.data.update(on_disk)
+                # If base_url missing, try to derive via health check from screenshot_upload.server_url, env, or DEFAULT_INGEST_URL
+                try:
+                    ing = self.data.get('ingestion', {}) or {}
+                    api = ing.get('api', {}) or {}
+                    base_url = (api.get('base_url') or '').strip()
+                    if not base_url:
+                        candidates = []
+                        su = self.data.get('screenshot_upload', {}) or {}
+                        su_url = (su.get('server_url') or '').strip().rstrip('/')
+                        if su_url:
+                            candidates.append(su_url)
+                        env_default = (os.environ.get('WFH_DEFAULT_INGEST_URL') or '').strip().rstrip('/')
+                        if env_default:
+                            candidates.append(env_default)
+                        if DEFAULT_INGEST_URL:
+                            candidates.append(DEFAULT_INGEST_URL)
+                        for url in candidates:
+                            try:
+                                r = requests.get(url + '/health', timeout=2)
+                                if r.ok:
+                                    api['base_url'] = url
+                                    ing['api'] = api
+                                    ing['mode'] = 'api'
+                                    self.data['ingestion'] = ing
+                                    Alerts.log(f"[CONFIG] Auto-set ingestion.api.base_url from health check: {url}")
+                                    break
+                            except Exception:
+                                continue
+                except Exception:
+                    pass
+                # Force API mode automatically if API base_url is configured
+                try:
+                    ing = self.data.get('ingestion', {}) or {}
+                    api = ing.get('api', {}) or {}
+                    base_url = (api.get('base_url') or '').strip()
+                    if base_url:
+                        if ing.get('mode') != 'api':
+                            ing['mode'] = 'api'
+                            self.data['ingestion'] = ing
+                            Alerts.log("[CONFIG] Detected ingestion.api.base_url; auto-forcing ingestion mode to 'api'")
+                except Exception:
+                    pass
+                # If we are running from temp and AppData config does not exist, persist normalized config there for future runs
+                try:
+                    if running_from_temp and not os.path.exists(appdata_cfg):
+                        os.makedirs(os.path.dirname(appdata_cfg), exist_ok=True)
+                        with open(appdata_cfg, 'w', encoding='utf-8') as wf:
+                            json.dump(self.data, wf, indent=2)
+                        Alerts.log(f"[CONFIG] Created user config at: {appdata_cfg}")
+                except Exception as e:
+                    Alerts.log(f"[CONFIG] Failed to create user config at AppData: {e}")
+                Alerts.log(f"[CONFIG] Config loaded successfully, ingestion mode: {self.data.get('ingestion', {}).get('mode', 'NOT SET')}")
             except Exception as e:
                 Alerts.log(f"Config load error: {e}")
         else:
+            Alerts.log(f"[CONFIG] Config file not found, creating default config")
             self.save()
 
     def save(self):
@@ -1670,6 +1783,10 @@ class Heartbeat(threading.Thread):
         self._next_periodic_ts: float = 0.0
         self._next_burst_ts: float = 0.0
         self._buf = IngestionBuffer(app_ref)
+        # Performance optimization: Cache CPU reading
+        self._cached_cpu = 0.0
+        self._last_cpu_check = 0.0
+        self._cpu_check_interval = 10.0  # Check CPU every 10 seconds instead of every second
 
     def run(self):
         while not self.stop_event.is_set():
@@ -1685,11 +1802,18 @@ class Heartbeat(threading.Thread):
                     batt = None
                 # geo info (cached via app)
                 geo = self.app_ref.get_geo_info() if self.app_ref else {}
+
+                # Performance optimization: Update CPU reading only every 10 seconds
+                now_ts = time.time()
+                if now_ts - self._last_cpu_check >= self._cpu_check_interval:
+                    self._cached_cpu = psutil.cpu_percent(interval=None)
+                    self._last_cpu_check = now_ts
+
                 hb = {
                     "ts": dt.datetime.now().isoformat(timespec='seconds'),
                     "current": cur,
                     "activity": activity_asdict(self.app_ref.activity),
-                    "cpu_percent": psutil.cpu_percent(interval=None),
+                    "cpu_percent": self._cached_cpu,  # Use cached value instead of calling every second
                     "mem_percent": psutil.virtual_memory().percent,
                     "battery": batt,
                     "geo": geo,

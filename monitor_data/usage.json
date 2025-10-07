@@ -1,32 +1,17 @@
 {
-  "code.exe": {
-    "productive": 33.591336250305176,
-    "unproductive": 0.0,
-    "neutral": 0.0
-  },
   "chrome.exe": {
     "productive": 0.0,
     "unproductive": 0.0,
-    "neutral": 29.80516791343689
+    "neutral": 1.9117226600646973
   },
-  "explorer.exe": {
-    "productive": 0.0,
+  "code.exe": {
+    "productive": 103.10763335227966,
     "unproductive": 0.0,
-    "neutral": 8.75922441482544
+    "neutral": 0.0
   },
   "electron.exe": {
     "productive": 0.0,
     "unproductive": 0.0,
-    "neutral": 26.520509481430054
-  },
-  "shellexperiencehost.exe": {
-    "productive": 0.0,
-    "unproductive": 0.0,
-    "neutral": 1.4529318809509277
-  },
-  "windsurf.exe": {
-    "productive": 0.0,
-    "unproductive": 0.0,
-    "neutral": 2.4804131984710693
+    "neutral": 4.004121541976929
   }
 }

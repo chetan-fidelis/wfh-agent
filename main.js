@@ -6,7 +6,7 @@ try {
   console.warn('Auto-updater not available:', e.message);
   autoUpdater = null;
 }
-const { spawn } = require('child_process');
+const { spawn, spawnSync, execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const https = require('https');
@@ -1450,9 +1450,26 @@ app.on('before-quit', async () => {
   try {
     if (backendProc && !backendProc.killed) {
       if (process.platform === 'win32') {
-        spawn('taskkill', ['/pid', String(backendProc.pid), '/f', '/t']);
+        try {
+          execSync(`taskkill /pid ${backendProc.pid} /f /t`, { timeout: 5000 });
+        } catch (e) {
+          console.warn('[backend] Failed to kill by PID:', e.message);
+        }
       } else {
         backendProc.kill('SIGTERM');
+      }
+    }
+
+    // Force kill ALL emp_monitor.exe processes synchronously
+    if (process.platform === 'win32') {
+      try {
+        execSync('taskkill /IM emp_monitor.exe /F', { timeout: 5000 });
+        console.log('[backend] Killed all emp_monitor.exe processes');
+      } catch (e) {
+        // taskkill returns error if no processes found, which is fine
+        if (!e.message.includes('not found')) {
+          console.warn('[backend] Failed to kill emp_monitor.exe:', e.message);
+        }
       }
     }
   } catch (e) {
