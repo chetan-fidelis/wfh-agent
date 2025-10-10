@@ -157,8 +157,7 @@ class APISync:
                     'work_location': 'remote',  # Default
                     'battery_percent': battery_level,
                     'battery_plugged': bool(battery_plugged) if battery_plugged is not None else None,
-                    'country': geo.get('country') if geo else None,
-                    'ip_address': geo.get('ip') if geo else None
+                    'geo': geo_json if geo_json else None  # Send geo as JSON string
                 })
                 record_ids.append(rec_id)
 

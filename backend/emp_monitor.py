@@ -245,16 +245,33 @@ DEFAULT_CONFIG = {
         "auto_heal": False,
         "high_cpu_threshold": 90,            # percent
         "high_cpu_duration_sec": 180,        # sustained duration
+        "high_memory_threshold": 90,         # percent
+        "high_memory_duration_sec": 180,     # sustained duration
+        "low_disk_threshold": 15,            # percent free space
+        "min_uptime_for_reboot_detect": 300, # 5 minutes
+        "battery_health_threshold": 60,      # percent
         "cooldowns": {                        # seconds to suppress duplicate tickets
             "high_cpu": 600,
-            "network_disconnect": 600,
-            "app_crash": 600
+            "high_memory": 600,
+            "low_disk": 3600,
+            "app_crash": 600,
+            "unexpected_reboot": 3600,
+            "service_stopped": 1800,
+            "usb_device": 1800,
+            "security_disabled": 1800,
+            "repeated_crash": 1800,
+            "battery_issue": 3600
         },
         "network_check_urls": [
             "http://clients3.google.com/generate_204",
             "https://www.msftconnecttest.com/connecttest.txt"
         ],
         "watched_apps": ["code.exe"],       # critical apps to watch for crash
+        "watched_services": [                # critical services to monitor
+            "Windefend",                     # Windows Defender
+            "WinDefend",
+            "SecurityHealthService"
+        ],
         "protected_processes": ["explorer.exe", "system", "wininit.exe"],
         "ticket_webhook": ""                # optional URL to POST new tickets
     },
@@ -4414,7 +4431,10 @@ class ITSMHelper(threading.Thread):
         self.app = app_ref
         self.stop_event = threading.Event()
         self.high_cpu_since: Optional[float] = None
+        self.high_memory_since: Optional[float] = None
         self.prev_running: set = set()
+        self.prev_usb_devices: set = set()
+        self.crash_history: Dict[str, List[float]] = {}
         self.last_ticket_ts: Dict[str, float] = {}  # Track last ticket timestamp per issue type
 
     def _create_ticket(self, issue_type: str, severity: str, details: Dict, actions_taken: Optional[List[str]] = None):
@@ -4620,17 +4640,280 @@ class ITSMHelper(threading.Thread):
                 )
         self.prev_running = running
 
+    def _check_disk_space(self):
+        """Check for low disk space on system drive"""
+        cfg = self.app.cfg.data.get('itsm', {})
+        thresh = int(cfg.get('low_disk_threshold', 15))
+        try:
+            usage = psutil.disk_usage('C:')
+            free_percent = (usage.free / usage.total) * 100
+            if free_percent < thresh:
+                self._create_ticket(
+                    issue_type="low_disk",
+                    severity="major",
+                    details={
+                        "drive": "C:",
+                        "free_percent": round(free_percent, 2),
+                        "free_gb": round(usage.free / (1024**3), 2),
+                        "total_gb": round(usage.total / (1024**3), 2)
+                    },
+                    actions_taken=[]
+                )
+        except Exception as e:
+            Alerts.log(f"Disk space check error: {e}")
+
+    def _check_memory_usage(self):
+        """Check for sustained high memory usage"""
+        cfg = self.app.cfg.data.get('itsm', {})
+        thresh = int(cfg.get('high_memory_threshold', 90))
+        dur = int(cfg.get('high_memory_duration_sec', 180))
+        mem = psutil.virtual_memory().percent
+        now = time.time()
+
+        if mem >= thresh:
+            if self.high_memory_since is None:
+                self.high_memory_since = now
+            elif (now - self.high_memory_since) >= dur:
+                # sustained high memory
+                actions = []
+                if cfg.get('auto_heal', False):
+                    # attempt to find top memory offender and terminate if not protected
+                    try:
+                        offenders = []
+                        for p in psutil.process_iter(['pid', 'name', 'memory_percent']):
+                            try:
+                                mem_pct = p.info.get('memory_percent', 0)
+                                if mem_pct:
+                                    offenders.append((p, mem_pct))
+                            except Exception:
+                                continue
+                        offenders.sort(key=lambda t: t[1], reverse=True)
+                        for p, pct in offenders[:3]:
+                            name = (p.info.get('name') or '').lower()
+                            if name and name not in cfg.get('protected_processes', []):
+                                try:
+                                    p.terminate()
+                                    actions.append(f"terminated {name} pid={p.pid} mem={pct:.1f}%")
+                                    break
+                                except Exception:
+                                    continue
+                    except Exception:
+                        pass
+                self._create_ticket(
+                    issue_type="high_memory",
+                    severity="major",
+                    details={"memory_percent": mem, "duration_sec": dur},
+                    actions_taken=actions
+                )
+                self.high_memory_since = None
+        else:
+            self.high_memory_since = None
+
+    def _check_unexpected_reboot(self):
+        """Detect unexpected system reboot based on low uptime"""
+        cfg = self.app.cfg.data.get('itsm', {})
+        min_uptime = int(cfg.get('min_uptime_for_reboot_detect', 300))
+        try:
+            uptime_sec = time.time() - psutil.boot_time()
+            if uptime_sec < min_uptime and not hasattr(self, '_reboot_check_done'):
+                self._create_ticket(
+                    issue_type="unexpected_reboot",
+                    severity="major",
+                    details={
+                        "uptime_seconds": round(uptime_sec, 2),
+                        "boot_time": dt.datetime.fromtimestamp(psutil.boot_time()).isoformat()
+                    },
+                    actions_taken=[]
+                )
+                self._reboot_check_done = True
+        except Exception as e:
+            Alerts.log(f"Reboot check error: {e}")
+
+    def _check_critical_services(self):
+        """Monitor critical Windows services"""
+        cfg = self.app.cfg.data.get('itsm', {})
+        watched = cfg.get('watched_services', [])
+        if not watched:
+            return
+
+        try:
+            for service_name in watched:
+                try:
+                    service = psutil.win_service_get(service_name)
+                    status = service.status()
+                    if status != 'running':
+                        self._create_ticket(
+                            issue_type="service_stopped",
+                            severity="critical",
+                            details={
+                                "service": service_name,
+                                "status": status,
+                                "display_name": service.display_name()
+                            },
+                            actions_taken=[]
+                        )
+                except psutil.NoSuchProcess:
+                    self._create_ticket(
+                        issue_type="service_stopped",
+                        severity="critical",
+                        details={
+                            "service": service_name,
+                            "status": "not_found"
+                        },
+                        actions_taken=[]
+                    )
+                except Exception:
+                    continue
+        except Exception as e:
+            Alerts.log(f"Service check error: {e}")
+
+    def _check_usb_devices(self):
+        """Detect new USB/external storage devices"""
+        try:
+            current_devices = set()
+            for part in psutil.disk_partitions(all=False):
+                if 'removable' in part.opts.lower():
+                    current_devices.add(part.device)
+
+            if not hasattr(self, 'prev_usb_devices'):
+                self.prev_usb_devices = current_devices
+                return
+
+            new_devices = current_devices - self.prev_usb_devices
+            if new_devices:
+                for device in new_devices:
+                    self._create_ticket(
+                        issue_type="usb_device",
+                        severity="minor",
+                        details={"device": device},
+                        actions_taken=[]
+                    )
+
+            self.prev_usb_devices = current_devices
+        except Exception as e:
+            Alerts.log(f"USB device check error: {e}")
+
+    def _check_security_status(self):
+        """Check if Windows Defender or antivirus is disabled"""
+        try:
+            # Check Windows Defender status via registry or WMI
+            import winreg
+            try:
+                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                    r"SOFTWARE\Microsoft\Windows Defender\Real-Time Protection", 0,
+                    winreg.KEY_READ)
+                disabled, _ = winreg.QueryValueEx(key, "DisableRealtimeMonitoring")
+                winreg.CloseKey(key)
+
+                if disabled == 1:
+                    self._create_ticket(
+                        issue_type="security_disabled",
+                        severity="critical",
+                        details={"protection": "Windows Defender Real-Time", "status": "disabled"},
+                        actions_taken=[]
+                    )
+            except FileNotFoundError:
+                pass  # Key doesn't exist, might be using different AV
+            except Exception:
+                pass
+        except Exception as e:
+            Alerts.log(f"Security status check error: {e}")
+
+    def _check_repeated_crashes(self):
+        """Detect repeated crashes of the same application"""
+        if not hasattr(self, 'crash_history'):
+            self.crash_history = {}
+
+        cfg = self.app.cfg.data.get('itsm', {})
+        watch = [w.lower() for w in cfg.get('watched_apps', [])]
+        if not watch:
+            return
+
+        now = time.time()
+        # Clean old crash history (older than 1 hour)
+        self.crash_history = {app: times for app, times in self.crash_history.items()
+                             if any(t > now - 3600 for t in times)}
+
+        running = set()
+        for p in psutil.process_iter(['name']):
+            try:
+                nm = (p.info.get('name') or '').lower()
+                if nm:
+                    running.add(nm)
+            except Exception:
+                continue
+
+        # Detect crashed apps
+        crashed = [app for app in watch if (app in self.prev_running and app not in running)]
+        for app in crashed:
+            if app not in self.crash_history:
+                self.crash_history[app] = []
+            self.crash_history[app].append(now)
+
+            # Check if crashed 3+ times in last hour
+            recent_crashes = [t for t in self.crash_history[app] if t > now - 3600]
+            if len(recent_crashes) >= 3:
+                self._create_ticket(
+                    issue_type="repeated_crash",
+                    severity="critical",
+                    details={
+                        "app": app,
+                        "crash_count": len(recent_crashes),
+                        "time_window": "1 hour"
+                    },
+                    actions_taken=[]
+                )
+                # Reset to avoid duplicate tickets
+                self.crash_history[app] = []
+
+    def _check_battery_health(self):
+        """Monitor battery health and charging issues (for laptops)"""
+        try:
+            battery = psutil.sensors_battery()
+            if battery is None:
+                return  # Not a laptop or no battery
+
+            cfg = self.app.cfg.data.get('itsm', {})
+            thresh = int(cfg.get('battery_health_threshold', 60))
+
+            # Check battery percentage when not plugged in
+            if not battery.power_plugged and battery.percent < 20:
+                self._create_ticket(
+                    issue_type="battery_issue",
+                    severity="minor",
+                    details={
+                        "issue": "low_battery",
+                        "percent": battery.percent,
+                        "power_plugged": battery.power_plugged
+                    },
+                    actions_taken=[]
+                )
+
+            # Note: Actual battery health % requires WMI or additional tools
+            # This is a simplified check based on available psutil data
+        except Exception as e:
+            Alerts.log(f"Battery health check error: {e}")
+
     def run(self):
         # Prime prev_running
         try:
             self.prev_running = { (p.info.get('name') or '').lower() for p in psutil.process_iter(['name']) }
         except Exception:
             self.prev_running = set()
+        # Run reboot check once at startup
+        self._check_unexpected_reboot()
+
         while not self.stop_event.is_set():
             try:
                 self._check_high_cpu()
-                self._check_network()
+                self._check_memory_usage()
+                self._check_disk_space()
+                self._check_critical_services()
+                self._check_usb_devices()
+                self._check_security_status()
                 self._check_app_crash()
+                self._check_repeated_crashes()
+                self._check_battery_health()
             except Exception as e:
                 Alerts.log(f"ITSMHelper loop error: {e}")
             time.sleep(30)
