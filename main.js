@@ -112,6 +112,30 @@ function formatDuration(ms) {
   return `${minutes}m`;
 }
 
+// Real-time timer update for tray menu
+let menuUpdateTimer = null;
+
+function startMenuUpdateTimer() {
+  if (menuUpdateTimer) return; // Already running
+
+  // Update menu every 30 seconds to show real-time duration
+  menuUpdateTimer = setInterval(() => {
+    if (tray && tray._rebuildMenu) {
+      tray._rebuildMenu();
+    }
+  }, 30000); // 30 seconds
+
+  console.log('[timer] Started real-time menu updates');
+}
+
+function stopMenuUpdateTimer() {
+  if (menuUpdateTimer) {
+    clearInterval(menuUpdateTimer);
+    menuUpdateTimer = null;
+    console.log('[timer] Stopped real-time menu updates');
+  }
+}
+
 // Get current work session status from backend
 async function getWorkStatus() {
   try {
@@ -233,8 +257,14 @@ function createTray() {
         work.current = { start_ts: nowIso(), end_ts: null, breaks: [], status: 'active' };
         saveWork(work);
         await backendPost('/session/start', {});
-        notify('Work Started', 'Your work timer has started. Have a productive day!');
+
+        // Enhanced notification with current time
+        const startTime = new Date(work.current.start_ts);
+        const timeStr = startTime.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+        notify('Work Started ✓', `Your work timer has started at ${timeStr}. Have a productive day!`);
+
         buildMenu();
+        startMenuUpdateTimer(); // Start real-time timer updates
       } catch (e) {
         console.error('Error starting work:', e);
       }
@@ -300,14 +330,20 @@ function createTray() {
         }, 0);
         const workMs = Math.max(0, durationMs - breakMs);
 
+        // Enhanced notification with end time and work summary
+        const endTimeObj = new Date(work.current.end_ts);
+        const timeStr = endTimeObj.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+
         work.sessions.push(work.current);
         work.current = null;
         saveWork(work);
 
         await backendPost('/session/end', {});
 
-        notify('Work Ended', `Great job! You worked for ${formatDuration(workMs)} today.`);
+        notify('Work Ended ✓', `Great job! You worked for ${formatDuration(workMs)} today. Ended at ${timeStr}.`);
+
         buildMenu();
+        stopMenuUpdateTimer(); // Stop real-time timer updates
       } catch (e) {
         console.error('Error ending work:', e);
       }
@@ -1286,6 +1322,13 @@ app.whenReady().then(async () => {
   // Sync session state with backend
   console.log('[session] Syncing with backend...');
   await syncSessionWithBackend();
+
+  // Check if there's an active work session and start timer
+  const initialStatus = await getWorkStatus();
+  if (initialStatus.status !== 'idle') {
+    console.log('[timer] Active session detected on startup, starting timer');
+    startMenuUpdateTimer();
+  }
 
   // Start watching for backend-generated notifications
   startAlertsWatcher();
