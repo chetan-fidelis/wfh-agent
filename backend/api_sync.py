@@ -283,20 +283,21 @@ class APISync:
             conn.close()
 
     def sync_work_sessions(self, emp_id: int, sessions_file: str) -> int:
-        """Sync work sessions from JSON file to API"""
+        """Sync work sessions from JSON file to API.
+        Marks synced sessions in-place instead of clearing the file, so the UI can show history.
+        """
         if not os.path.exists(sessions_file):
             return 0
 
         try:
             with open(sessions_file, 'r', encoding='utf-8') as f:
-                sessions = json.load(f)
+                sessions = json.load(f) or []
 
-            if not sessions:
-                return 0
-
-            # Prepare sessions for API
-            session_records = []
+            # Filter unsynced, valid sessions
+            to_send = []
             for session in sessions:
+                if session.get('synced'):
+                    continue
                 if not session.get('start_ts') or not session.get('end_ts'):
                     continue
 
@@ -315,7 +316,7 @@ class APISync:
 
                 work_ms = max(0, total_ms - break_ms)
 
-                session_records.append({
+                to_send.append({
                     'emp_id': emp_id,
                     'start_ts': session['start_ts'],
                     'end_ts': session['end_ts'],
@@ -325,21 +326,26 @@ class APISync:
                     'total_ms': total_ms
                 })
 
-            if not session_records:
+            if not to_send:
                 return 0
 
             # Send to API
             if self._make_request('/api/ingest/work_sessions', {
                 'emp_id': emp_id,
-                'records': session_records
+                'records': to_send
             }):
-                self.log(f"Synced {len(session_records)} work sessions to API")
+                self.log(f"Synced {len(to_send)} work sessions to API")
 
-                # Clear synced sessions from file
+                # Mark those entries as synced and write back
+                start_set = {rec['start_ts'] for rec in to_send}
+                for s in sessions:
+                    if s.get('start_ts') in start_set and s.get('end_ts'):
+                        s['synced'] = True
+
                 with open(sessions_file, 'w', encoding='utf-8') as f:
-                    json.dump([], f)
+                    json.dump(sessions, f, indent=2)
 
-                return len(session_records)
+                return len(to_send)
             else:
                 return 0
 

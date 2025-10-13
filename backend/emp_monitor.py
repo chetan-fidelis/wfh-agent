@@ -2674,8 +2674,37 @@ def compute_wellness(timeline_path: str = TIMELINE_JSON, cfg: Optional['Config']
     # Load timeline
     timeline = {}
     if os.path.exists(timeline_path):
-        with open(timeline_path, 'r', encoding='utf-8') as f:
-            timeline = json.load(f)
+        # Robust loader: tolerate JSONL or partially written JSON
+        try:
+            with open(timeline_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            # First try strict JSON
+            try:
+                loaded = json.loads(content)
+                if isinstance(loaded, dict):
+                    timeline = loaded
+                else:
+                    timeline = {}
+            except json.JSONDecodeError:
+                # Fallback: parse line-by-line as JSONL and merge dicts
+                merged: Dict[str, Dict] = {}
+                for line in content.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                        if isinstance(obj, dict):
+                            for k, v in obj.items():
+                                if isinstance(k, str) and isinstance(v, dict):
+                                    merged.setdefault(k, {}).update(v)
+                    except Exception:
+                        # Ignore bad line
+                        continue
+                timeline = merged
+        except Exception:
+            # On any error, fall back to empty to avoid crashing the agent
+            timeline = {}
     # Load thresholds
     thresholds = DEFAULT_CONFIG.get('wellness_thresholds', {}).copy()
     work_hours = (DEFAULT_CONFIG['work_hours']['start'], DEFAULT_CONFIG['work_hours']['end'])
@@ -3462,10 +3491,10 @@ class MonitorApp:
             try:
                 days = int((request.args.get('days') if request else None) or 7)
                 since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)
-                # try DB first
+                # Collect from DB (if configured) and file, then merge
                 kpi = {"total_work_ms": 0, "total_break_ms": 0, "avg_work_ms": 0, "sessions_completed": 0}
-                rows = []
-                used_db = False
+                merged: Dict[str, Dict] = {}
+                # DB source
                 try:
                     ing = self.cfg.data.get('ingestion', {})
                     if ing.get('mode') == 'postgres' and psycopg is not None:
@@ -3484,27 +3513,40 @@ class MonitorApp:
                                     """, (int(self.cfg.data.get('emp_id', 0)), since))
                                     recs = cur.fetchall()
                                     for (st_ts, en_ts, br, wms, bms, tms) in recs:
-                                        rows.append({"start_ts": st_ts.isoformat(), "end_ts": (en_ts.isoformat() if en_ts else None), "breaks": br, "work_ms": wms or 0, "break_ms": bms or 0, "total_ms": tms or 0})
-                                    used_db = True
+                                        key = st_ts.isoformat()
+                                        merged[key] = {"start_ts": key, "end_ts": (en_ts.isoformat() if en_ts else None), "breaks": br, "work_ms": int(wms or 0), "break_ms": int(bms or 0), "total_ms": int(tms or 0)}
                 except Exception as e:
                     Alerts.log(f"work session summary db error: {e}")
-                    used_db = False
-                if not used_db:
-                    # file fallback
-                    try:
-                        p = _work_file_path()
-                        if os.path.exists(p):
-                            with open(p, 'r', encoding='utf-8') as f:
-                                arr = json.load(f)
-                                for r in arr:
-                                    try:
-                                        if dt.datetime.fromisoformat(r.get('start_ts')).replace(tzinfo=None) >= since.replace(tzinfo=None):
-                                            rows.append(r)
-                                    except Exception:
+                # File source (always merge)
+                try:
+                    p = _work_file_path()
+                    if os.path.exists(p):
+                        with open(p, 'r', encoding='utf-8') as f:
+                            arr = json.load(f)
+                            for r in arr:
+                                try:
+                                    st = r.get('start_ts')
+                                    if not st:
                                         continue
-                    except Exception:
-                        pass
-                # aggregate
+                                    if dt.datetime.fromisoformat(st).replace(tzinfo=None) < since.replace(tzinfo=None):
+                                        continue
+                                    key = st
+                                    # Prefer DB entry when present; otherwise take file
+                                    if key not in merged:
+                                        merged[key] = {
+                                            "start_ts": r.get('start_ts'),
+                                            "end_ts": r.get('end_ts'),
+                                            "breaks": r.get('breaks') or [],
+                                            "work_ms": int(r.get('work_ms') or 0),
+                                            "break_ms": int(r.get('break_ms') or 0),
+                                            "total_ms": int(r.get('total_ms') or 0),
+                                        }
+                                except Exception:
+                                    continue
+                except Exception as e:
+                    Alerts.log(f"work session summary file error: {e}")
+                # Finalize rows sorted by start_ts desc
+                rows = sorted(merged.values(), key=lambda x: x.get('start_ts') or '', reverse=True)
                 if rows:
                     kpi['sessions_completed'] = len(rows)
                     kpi['total_work_ms'] = sum(int(r.get('work_ms') or 0) for r in rows)

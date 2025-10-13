@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, nativeTheme, Notification, powerMonitor, Tray, Menu, netLog } = require('electron');
+const { app, BrowserWindow, ipcMain, Notification, Menu, Tray, dialog, shell, nativeTheme, netLog, powerMonitor } = require('electron');
 let autoUpdater;
 try {
   autoUpdater = require('electron-updater').autoUpdater;
@@ -1413,7 +1413,28 @@ app.whenReady().then(async () => {
   } catch (e) {
     console.warn('powerMonitor hook failed:', e.message);
   }
-  // Determine if on office network and auto-start work (SSID takes precedence over IP)
+  // Network status for UI (Office vs Remote)
+  ipcMain.handle('net:status', async () => {
+    try {
+      const cfg = loadConfig();
+      const [ip, ssid] = await Promise.all([getPublicIp(), getCurrentSsid()]);
+      // SSID takes precedence: if SSID is known and not in office list, treat as Remote
+      let isOffice = false;
+      if (cfg.forceRemote) {
+        isOffice = false;
+      } else if (cfg.forceOffice) {
+        isOffice = true;
+      } else if (ssid) {
+        isOffice = (cfg.officeSsids || []).includes(ssid);
+      } else if (ip) {
+        isOffice = (cfg.officeIps || []).includes(ip);
+      }
+      return { ok: true, data: { ip, ssid, isOffice } };
+    } catch (e) {
+      return { ok: false, error: e.message };
+    }
+  });
+  // Determine if on office network and auto-start work
   try {
     const cfg = loadConfig();
     const [ip, ssid] = await Promise.all([getPublicIp(), getCurrentSsid()]);
@@ -1703,26 +1724,100 @@ function notify(title, body) {
   } catch (_) {}
 }
 
-function setupAutoUpdater() {
-  if (!app.isPackaged || !autoUpdater) return; // only in packaged builds with autoUpdater available
+// Expose notifications to renderer via IPC
+ipcMain.handle('notify', async (_evt, { title, body }) => {
   try {
+    notify(String(title || 'Notification'), String(body || ''));
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+// Append a line to alerts.log so admins can see updater activity in the shared log
+function alertsLog(msg) {
+  try {
+    // Ensure directory exists
+    const dir = path.dirname(ALERTS_LOG);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    const line = `[${new Date().toISOString()}] ${msg}`;
+    fs.appendFileSync(ALERTS_LOG, `${line}\n`, 'utf-8');
+  } catch (_) { /* ignore */ }
+}
+
+function setupAutoUpdater() {
+
+  alertsLog('Auto updater setup');
+
+  //if (!app.isPackaged || !autoUpdater) return; // only in packaged builds with autoUpdater available
+  try {
+    // Dev-mode visibility and guards
+    if (!autoUpdater) {
+      alertsLog('auto-updater: unavailable (autoUpdater is null)');
+      return;
+    }
+    if (!app.isPackaged) {
+      // In dev, disable actual update checking to avoid 404 errors
+      // but still set up logging and event handlers for testing
+      alertsLog('auto-updater: dev mode detected - disabling actual update checks to avoid 404 errors');
+
+      // Set up event handlers that just log (no actual checking)
+      autoUpdater.on('checking-for-update', () => {
+        alertsLog('auto-updater: would check for updates (dev mode)');
+      });
+      autoUpdater.on('update-available', (info) => {
+        alertsLog('auto-updater: update would be available (dev mode)');
+      });
+      autoUpdater.on('update-not-available', () => {
+        alertsLog('auto-updater: no updates available (dev mode)');
+      });
+      autoUpdater.on('error', (err) => {
+        alertsLog(`auto-updater: error in dev mode -> ${err.message}`);
+      });
+
+      // Simulate a check result for dev mode
+      setTimeout(() => {
+        alertsLog('auto-updater: dev mode check complete - no updates available');
+      }, 3000);
+
+      return; // Don't set up actual updater in dev mode
+    }
     // Configure electron-updater for GitHub releases
+    // Force dev update config for testing in development mode - set this first
+    autoUpdater.forceDevUpdateConfig = true;
+
     autoUpdater.logger = {
-      info: (msg) => console.log(`[auto-updater] ${msg}`),
-      warn: (msg) => console.warn(`[auto-updater] ${msg}`),
-      error: (msg) => console.error(`[auto-updater] ${msg}`)
+      info: (msg) => {
+        console.log(`[auto-updater] ${msg}`);
+        alertsLog(`auto-updater: ${msg}`);
+      },
+      warn: (msg) => {
+        console.warn(`[auto-updater] ${msg}`);
+        alertsLog(`auto-updater: ${msg}`);
+      },
+      error: (msg) => {
+        console.error(`[auto-updater] ${msg}`);
+        alertsLog(`auto-updater: ${msg}`);
+      }
     };
 
+    alertsLog('auto-updater: initialized');
+
     // electron-updater automatically detects GitHub releases from package.json repository field
-    autoUpdater.checkForUpdatesAndNotify = false; // We'll handle notifications manually
+    autoUpdater.checkForUpdatesAndNotify = true; // We'll handle notifications manually
 
     autoUpdater.on('checking-for-update', () => {
       updateState.checking = true; updateState.available = false; updateState.downloaded = false; updateState.progress = null;
+      alertsLog('auto-updater: checking for updates...');
+      console.log('[auto-updater] Event: checking-for-update fired');
       if (tray && tray._rebuildMenu) tray._rebuildMenu();
     });
     autoUpdater.on('update-available', (info) => {
       updateState.checking = false; updateState.available = true; updateState.version = info && info.version;
-      console.log(`[auto-updater] Update available: ${updateState.version}`);
+      console.log(`[auto-updater] Event: update-available fired: ${updateState.version}`);
+      alertsLog(`auto-updater: update available -> ${updateState.version || ''}`);
       notify('Update available', `Version ${updateState.version || ''} is downloading in background...`);
       if (tray && tray._rebuildMenu) tray._rebuildMenu();
       // Automatically start download
@@ -1730,16 +1825,19 @@ function setupAutoUpdater() {
         autoUpdater.downloadUpdate();
       } catch (e) {
         console.warn('Auto-download failed:', e.message);
+        alertsLog(`auto-updater: auto-download failed -> ${e.message}`);
       }
     });
     autoUpdater.on('update-not-available', () => {
       updateState.checking = false; updateState.available = false; updateState.downloaded = false;
-      console.log('[auto-updater] No updates available');
+      console.log('[auto-updater] Event: update-not-available fired');
+      alertsLog('auto-updater: no updates available');
       if (tray && tray._rebuildMenu) tray._rebuildMenu();
     });
     autoUpdater.on('error', (err) => {
       updateState.checking = false;
       console.warn('autoUpdater error:', err && err.message || err);
+      alertsLog(`auto-updater: error -> ${(err && err.message) || String(err)}`);
 
       // Don't show error notifications for common issues in development/testing
       if (err && err.message) {
@@ -1747,7 +1845,9 @@ function setupAutoUpdater() {
         if (!errorMsg.includes('squirrel') &&
             !errorMsg.includes('no published versions') &&
             !errorMsg.includes('404') &&
-            !errorMsg.includes('releases.atom')) {
+            !errorMsg.includes('releases.atom') &&
+            !errorMsg.includes('dev-app-update.yml') &&
+            !errorMsg.includes('enoent')) {
           notify('Update error', err.message);
         }
       }
@@ -1757,10 +1857,12 @@ function setupAutoUpdater() {
     autoUpdater.on('download-progress', (p) => {
       updateState.progress = p;
       console.log(`[auto-updater] Download progress: ${Math.round(p.percent)}%`);
+      alertsLog(`auto-updater: download ${Math.round(p.percent)}%`);
     });
     autoUpdater.on('update-downloaded', (info) => {
       updateState.downloaded = true; updateState.available = true; updateState.checking = false;
       console.log(`[auto-updater] Update downloaded: ${updateState.version}`);
+      alertsLog(`auto-updater: update downloaded -> ${updateState.version || ''}`);
 
       if (updateState.autoInstall) {
         // Auto-install after a short delay
@@ -1770,6 +1872,7 @@ function setupAutoUpdater() {
             autoUpdater.quitAndInstall();
           } catch (e) {
             console.warn('Auto-install failed:', e.message);
+            alertsLog(`auto-updater: auto-install failed -> ${e.message}`);
             notify('Update ready', 'Please restart manually to apply the update.');
           }
         }, 3000); // 3 second delay
@@ -1777,6 +1880,9 @@ function setupAutoUpdater() {
         notify('Update ready', 'Restart to apply the update.');
       }
       if (tray && tray._rebuildMenu) tray._rebuildMenu();
+    });
+    autoUpdater.on('before-quit-for-update', () => {
+      alertsLog('auto-updater: before quit for update');
     });
     // Start periodic update checks (every 4 hours)
     startPeriodicUpdateChecks();
@@ -1786,7 +1892,7 @@ function setupAutoUpdater() {
 }
 
 function startPeriodicUpdateChecks() {
-  if (!app.isPackaged || !autoUpdater) return;
+  if (!autoUpdater) return;
 
   // Check for updates every 4 hours (14400000 ms)
   updateCheckInterval = setInterval(() => {
@@ -1797,7 +1903,9 @@ function startPeriodicUpdateChecks() {
   // Initial check after 30 seconds (startup delay)
   setTimeout(() => {
     console.log('[auto-updater] Initial startup update check...');
-    checkForUpdates(true); // Silent check
+    alertsLog('auto-updater: initial update check scheduled');
+    // Make initial check non-silent so it is visible in alerts.log
+    checkForUpdates(false);
   }, 30000);
 }
 
@@ -1809,28 +1917,43 @@ function stopPeriodicUpdateChecks() {
 }
 
 function checkForUpdates(silent = false) {
-  if (!app.isPackaged || !autoUpdater) {
+  if (!autoUpdater) {
     if (!silent) notify('Updater disabled', 'Updates only work in packaged builds.');
+    // Also log to alerts so devs see why nothing appears in logs
+    alertsLog('auto-updater: disabled (dev mode or unavailable)');
     return;
   }
   try {
-    if (!silent) console.log('[auto-updater] Checking for updates...');
+    if (!silent) {
+      console.log('[auto-updater] Checking for updates...');
+      alertsLog('auto-updater: calling checkForUpdates()');
+    }
     autoUpdater.checkForUpdates().catch(err => {
       console.warn('checkForUpdates failed:', err.message);
+      alertsLog(`auto-updater: checkForUpdates error -> ${err.message}`);
       if (!silent && !err.message.toLowerCase().includes('squirrel')) {
-        notify('Update check failed', 'Unable to check for updates. Please try again later.');
+        // Only show notification for non-dev errors
+        const errorMsg = err.message.toLowerCase();
+        if (!errorMsg.includes('no published versions') &&
+            !errorMsg.includes('404') &&
+            !errorMsg.includes('releases.atom') &&
+            !errorMsg.includes('dev-app-update.yml') &&
+            !errorMsg.includes('enoent')) {
+          notify('Update check failed', 'Unable to check for updates. Please try again later.');
+        }
       }
     });
   } catch (e) {
     console.warn('checkForUpdates failed:', e.message);
+    alertsLog(`auto-updater: checkForUpdates exception -> ${e.message}`);
   }
 }
 function downloadUpdate() {
-  if (!app.isPackaged || !autoUpdater) return;
+  if (!autoUpdater) return;
   try { autoUpdater.downloadUpdate(); } catch (e) { console.warn('downloadUpdate failed:', e.message); }
 }
 function installAndRestart() {
-  if (!app.isPackaged || !autoUpdater) return;
+  if (!autoUpdater) return;
   try { autoUpdater.quitAndInstall(); } catch (e) { console.warn('quitAndInstall failed:', e.message); }
 }
 
@@ -1841,23 +1964,32 @@ function toggleAutoInstall() {
   if (tray && tray._rebuildMenu) tray._rebuildMenu();
 }
 
-// Network status for UI (Office vs Remote)
-ipcMain.handle('net:status', async () => {
+// IPC handlers for manual update checks
+ipcMain.handle('updater:check', async () => {
   try {
-    const cfg = loadConfig();
-    const [ip, ssid] = await Promise.all([getPublicIp(), getCurrentSsid()]);
-    // SSID takes precedence: if SSID is known and not in office list, treat as Remote
-    let isOffice = false;
-    if (cfg.forceRemote) {
-      isOffice = false;
-    } else if (cfg.forceOffice) {
-      isOffice = true;
-    } else if (ssid) {
-      isOffice = (cfg.officeSsids || []).includes(ssid);
-    } else if (ip) {
-      isOffice = (cfg.officeIps || []).includes(ip);
-    }
-    return { ok: true, data: { ip, ssid, isOffice } };
+    alertsLog('auto-updater: manual check triggered via IPC');
+    checkForUpdates(false);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+ipcMain.handle('updater:download', async () => {
+  try {
+    alertsLog('auto-updater: manual download triggered via IPC');
+    downloadUpdate();
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+ipcMain.handle('updater:install', async () => {
+  try {
+    alertsLog('auto-updater: manual install triggered via IPC');
+    installAndRestart();
+    return { ok: true };
   } catch (e) {
     return { ok: false, error: e.message };
   }

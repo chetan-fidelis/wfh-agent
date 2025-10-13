@@ -23,6 +23,7 @@
   const winMin = document.getElementById('winMin');
   const winMax = document.getElementById('winMax');
   const winClose = document.getElementById('winClose');
+  const sessionTimer = document.getElementById('sessionTimer');
   const banner = document.getElementById('banner');
   const bannerText = document.getElementById('bannerText');
   const bannerClose = document.getElementById('bannerClose');
@@ -39,6 +40,10 @@
     if (h > 0) return `${h}h ${m}m`;
     if (m > 0) return `${m}m`;
     return `${rs}s`;
+  }
+
+  function notifyNative(title, msg) {
+    try { if (window.api && window.api.notify) window.api.notify(title, msg); } catch (_) {}
   }
   // Listen to auto-start ack
   if (window.api && window.api.onWorkAutoStart) {
@@ -165,6 +170,67 @@
     breakBtn.disabled = state === 'idle';
     breakBtn.textContent = state === 'break' ? 'Resume' : 'Take Break';
     endBtn.disabled = state === 'idle';
+    currentState = state;
+  }
+
+  // Live timer
+  let currentState = 'idle';
+  let currentStartTs = 0; // ms
+  let currentBreakAccum = 0; // ms
+  async function computeTimerState() {
+    try {
+      const cfg = await window.api.getConfig();
+      const st = await window.api.get('/session/state', cfg.serverUrl);
+      if (st.ok && st.data && st.data.state && st.data.state.start_ts) {
+        const startMs = new Date(st.data.state.start_ts).getTime();
+        let breakMs = 0;
+        const br = st.data.state.breaks || [];
+        for (const b of br) {
+          if (b.start_ts) {
+            const bs = new Date(b.start_ts).getTime();
+            const be = b.end_ts ? new Date(b.end_ts).getTime() : Date.now();
+            breakMs += Math.max(0, be - bs);
+          }
+        }
+        currentStartTs = startMs;
+        currentBreakAccum = breakMs;
+        currentState = br.length > 0 && !br[br.length - 1].end_ts ? 'break' : 'active';
+        return;
+      }
+    } catch (_) {}
+    // Fallback to local
+    try {
+      const ls = await window.api.workState();
+      if (ls && ls.current && ls.current.start_ts && !ls.current.end_ts) {
+        currentStartTs = new Date(ls.current.start_ts).getTime();
+        let breakMs = 0;
+        const br = ls.current.breaks || [];
+        for (const b of br) {
+          if (b.start_ts) {
+            const bs = new Date(b.start_ts).getTime();
+            const be = b.end_ts ? new Date(b.end_ts).getTime() : Date.now();
+            breakMs += Math.max(0, be - bs);
+          }
+        }
+        currentBreakAccum = breakMs;
+        currentState = br.length > 0 && !br[br.length - 1].end_ts ? 'break' : 'active';
+        return;
+      }
+    } catch (_) {}
+    currentStartTs = 0; currentBreakAccum = 0; currentState = 'idle';
+  }
+
+  function tickTimer() {
+    if (!sessionTimer) return;
+    if (!currentStartTs) {
+      sessionTimer.textContent = '—';
+      return;
+    }
+    const now = Date.now();
+    const total = now - currentStartTs;
+    const work = Math.max(0, total - currentBreakAccum);
+    const label = currentState === 'break' ? 'Break' : 'Work';
+    sessionTimer.textContent = `${label}: ${msToHuman(work)}`;
   }
 
   async function refreshSummary() {
@@ -179,13 +245,16 @@
       kpiSessions.textContent = (k.sessions_completed || 0).toString();
 
       // Show newest first (descending by start_ts)
-      const rows = (res.data.rows || []).slice().sort((a, b) => {
+      const fetched = (res.data.rows || []).slice().sort((a, b) => {
         const ad = new Date(a.start_ts || a.start || 0).getTime();
         const bd = new Date(b.start_ts || b.start || 0).getTime();
         return bd - ad; // newest first
       });
-      pagination.allRows = rows;
-      pagination.pageIndex = 0;
+      // If API returned empty, keep previous list to avoid flicker/empty state during active session start
+      if (fetched.length > 0) {
+        pagination.allRows = fetched;
+        pagination.pageIndex = 0;
+      }
       const pagEl = document.querySelector('.table-pagination');
       if (pagEl) pagEl.style.display = 'flex';
       renderSessionsPage();
@@ -353,6 +422,7 @@
       console.error('start error', r.error);
       // Offline/local fallback: start local tracker and show banner
       try { await window.api.workStart(); } catch (_) {}
+      notifyNative('Work Started', 'Tracking started locally (offline).');
       if (banner && bannerText) {
         banner.classList.remove('success', 'info', 'error');
         banner.classList.add('info');
@@ -362,10 +432,12 @@
       }
       showToast({ title: 'Sync Queued', msg: 'Start will sync when online.', type: 'info' });
     } else {
+      notifyNative('Work Started', 'Synced with server.');
       showToast({ title: 'Sync Successful', msg: 'Work start synced with server.', type: 'success' });
     }
     await refreshState();
     await refreshSummary();
+    await computeTimerState();
   });
 
   breakBtn.addEventListener('click', async () => {
@@ -383,6 +455,8 @@
       }
       await refreshState();
       await refreshSummary();
+      await computeTimerState();
+      notifyNative(state === 'break' ? 'Resumed Work' : 'Break Started', state === 'break' ? 'Work resumed.' : 'Enjoy your break.');
     }
   });
 
@@ -397,6 +471,8 @@
     }
     await refreshState();
     await refreshSummary();
+    await computeTimerState();
+    notifyNative('Work Ended', 'Good job today!');
   });
 
   if (applyRange) {
@@ -408,8 +484,11 @@
   // Initial loads
   refreshState();
   refreshSummary();
+  computeTimerState();
   loadProfile();
   refreshNetBadge();
+  setInterval(computeTimerState, 5000);
+  setInterval(tickTimer, 1000);
   // Wire window controls
   if (winMin) winMin.addEventListener('click', () => window.api.winMinimize());
   if (winMax) winMax.addEventListener('click', () => window.api.winMaximizeToggle());

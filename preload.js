@@ -30,6 +30,12 @@ contextBridge.exposeInMainWorld('api', {
   workEnd: () => ipcRenderer.invoke('work:end'),
   workState: () => ipcRenderer.invoke('work:state'),
   workSummary: (days) => ipcRenderer.invoke('work:summary', { days }),
+  // Updater controls
+  updaterCheck: () => ipcRenderer.invoke('updater:check'),
+  updaterDownload: () => ipcRenderer.invoke('updater:download'),
+  updaterInstall: () => ipcRenderer.invoke('updater:install'),
   // App info
-  appVersion: () => ipcRenderer.invoke('app:version')
+  appVersion: () => ipcRenderer.invoke('app:version'),
+  // Native notification
+  notify: (title, body) => ipcRenderer.invoke('notify', { title, body })
 });

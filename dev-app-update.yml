@@ -1,0 +1,9 @@
+# Dev mode configuration - disables updates for development testing
+# Comment out the provider to disable auto-updates in dev mode
+# This prevents 404 errors while still allowing updater mechanism testing
+
+# provider: github
+# owner: chetan-fidelis
+# repo: wfh-agent
+
+# Empty configuration disables updates but allows testing the updater mechanism
