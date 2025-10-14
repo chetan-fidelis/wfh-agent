@@ -21,6 +21,7 @@ from urllib.parse import urlparse
 from typing import Dict, List, Tuple, Optional, Any, Set, Union
 from dataclasses import dataclass, asdict
 import warnings
+import gc
 
 # Import LocalStorage for SQLite with Postgres sync
 try:
@@ -165,6 +166,7 @@ WELLNESS_JSON = os.path.join(DATA_DIR, 'wellness.json')
 TIMELINE_JSON = os.path.join(DATA_DIR, 'timeline.json')
 WEBSITE_USAGE_JSON = os.path.join(DATA_DIR, 'website_usage.json')
 WEBSITE_USAGE_BY_TAG_JSON = os.path.join(DATA_DIR, 'website_usage_by_tag.json')
+WEBSITE_SESSIONS_JSON = os.path.join(DATA_DIR, 'website_sessions.json')
 HEARTBEAT_DIR = os.path.join(DATA_DIR, 'heartbeats')
 ITSM_TICKETS_JSON = os.path.join(DATA_DIR, 'itsm_tickets.json')
 ESG_DIR = os.path.join(DATA_DIR, 'esg')
@@ -305,13 +307,20 @@ DEFAULT_CONFIG = {
         "file_retention_days": 30,       # how long to keep daily heartbeat files
         "batch_size": 200,               # max items per flush
         "flush_interval_sec": 30,        # flush cadence
-        "heartbeat_sync_sec": 30,        # how often to sync heartbeat
-        "full_sync_sec": 60,             # how often to sync all data
+        "heartbeat_sync_sec": 1800,      # how often to sync heartbeat (30 minutes)
+        "full_sync_sec": 3600,           # how often to sync all data (60 minutes)
         "sampling": {
             "state_change": True,        # emit on status/process/url change
             "periodic_sec": 60,          # periodic snapshot interval
             "active_burst_sec": 5,       # extra sampling during active
             "active_burst_cpu_percent": 50
+        },
+        "screenshot": {
+            "encrypt": True,             # Enable AES-256-GCM encryption for screenshots
+            "encryption_key": None,      # Optional custom key (None = machine-derived)
+            "compress": True,            # Compress before encryption
+            "max_size": [1920, 1080],    # Maximum dimensions
+            "quality": 75                # JPEG quality (1-100)
         },
         "api": {
             "base_url": "http://20.197.8.101:5050",
@@ -353,12 +362,12 @@ class LocalStorage:
         # Make sync intervals configurable
         if self.app_ref and hasattr(self.app_ref, 'cfg'):
             ing = self.app_ref.cfg.data.get('ingestion', {})
-            self.sync_interval = int(ing.get('heartbeat_sync_sec', 300))  # default 5 min
-            self.full_sync_interval = int(ing.get('full_sync_sec', 900))   # default 15 min
+            self.sync_interval = int(ing.get('heartbeat_sync_sec', 1800))  # default 30 min
+            self.full_sync_interval = int(ing.get('full_sync_sec', 3600))   # default 60 min
         else:
             # Safe defaults if config not available
-            self.sync_interval = 300
-            self.full_sync_interval = 900
+            self.sync_interval = 1800  # 30 minutes
+            self.full_sync_interval = 3600  # 60 minutes
         # Ensure a lock exists for sync
         self.sync_lock = threading.Lock()
         conn = sqlite3.connect(self.db_path)
@@ -1804,6 +1813,8 @@ class Heartbeat(threading.Thread):
         self._cached_cpu = 0.0
         self._last_cpu_check = 0.0
         self._cpu_check_interval = 10.0  # Check CPU every 10 seconds instead of every second
+        self._last_gc_ts = time.time()  # For periodic garbage collection
+        self._gc_interval = 300.0  # Run garbage collection every 5 minutes
 
     def run(self):
         while not self.stop_event.is_set():
@@ -1871,6 +1882,13 @@ class Heartbeat(threading.Thread):
                 # periodic flush/retention
                 self._buf.maybe_flush()
                 self._cleanup_old_heartbeats()
+
+                # Periodic garbage collection to prevent memory leaks
+                if now_ts - self._last_gc_ts >= self._gc_interval:
+                    collected = gc.collect()
+                    self._last_gc_ts = now_ts
+                    if collected > 0:
+                        Alerts.log(f"Heartbeat GC: Collected {collected} objects")
             except Exception as e:
                 Alerts.log(f"Heartbeat error: {e}")
             time.sleep(1.0)
@@ -3182,6 +3200,71 @@ class MonitorApp:
                     web_usage_by_tag = json.load(f)
             except Exception:
                 web_usage_by_tag = {}
+            # Make website usage human readable with start/end time and rounded minutes
+            try:
+                # Build first/last seen per domain from today's heartbeat
+                first_last: Dict[str, Dict[str, str]] = {}
+                day_key = dt.datetime.now().strftime('%Y-%m-%d')
+                hb_path = os.path.join(HEARTBEAT_DIR, f'heartbeat_{day_key}.jsonl')
+                if os.path.exists(hb_path):
+                    with open(hb_path, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                rec = json.loads(line)
+                            except Exception:
+                                continue
+                            ts = rec.get('ts') or rec.get('timestamp')
+                            cur = rec.get('current') or {}
+                            url = cur.get('url') or ''
+                            # Extract domain
+                            try:
+                                p = urlparse(url)
+                                dom = (p.netloc or '').split('@')[-1].split(':')[0].lower()
+                                if dom.startswith('www.'):
+                                    dom = dom[4:]
+                            except Exception:
+                                dom = ''
+                            if not ts or not dom:
+                                continue
+                            ent = first_last.get(dom)
+                            if not ent:
+                                first_last[dom] = {'start_ts': ts, 'end_ts': ts}
+                            else:
+                                ent['end_ts'] = ts
+                # Convert totals to minutes with 2 decimals and attach times when available
+                human: Dict[str, Dict[str, object]] = {}
+                if isinstance(web_usage, dict):
+                    for dom, secs in web_usage.items():
+                        mins = round(float(secs or 0.0) / 60.0, 2)
+                        times = first_last.get(dom, {})
+                        human[dom] = {
+                            'duration_min': mins,
+                            'start_ts': times.get('start_ts'),
+                            'end_ts': times.get('end_ts')
+                        }
+                # Also include domains seen today even if no totals yet
+                for dom, times in first_last.items():
+                    if dom not in human:
+                        human[dom] = {
+                            'duration_min': 0.0,
+                            'start_ts': times.get('start_ts'),
+                            'end_ts': times.get('end_ts')
+                        }
+                # Add human-readable local times
+                for dom, rec in human.items():
+                    def _fmt(ts: Optional[str]) -> Optional[str]:
+                        try:
+                            return dt.datetime.fromisoformat(ts).strftime('%d %b %Y, %I:%M %p') if ts else None
+                        except Exception:
+                            return None
+                    rec['start_time'] = _fmt(rec.get('start_ts'))
+                    rec['end_time'] = _fmt(rec.get('end_ts'))
+                web_usage = human
+            except Exception as e:
+                Alerts.log(f"/status website_usage humanize error: {e}")
             # battery & geo
             battery = None
             try:
@@ -3234,6 +3317,27 @@ class MonitorApp:
                 'service': 'emp-monitor-api',
                 'timestamp': dt.datetime.now().isoformat()
             })
+
+        @app.route('/diagnostics', methods=['GET'])
+        def diagnostics():
+            """System diagnostics endpoint for troubleshooting"""
+            try:
+                from system_diagnostics import SystemDiagnostics
+
+                diag = SystemDiagnostics()
+                diag.collect_all()
+
+                # Get format parameter (json or text)
+                output_format = request.args.get('format', 'json').lower()
+
+                if output_format == 'text':
+                    summary = diag.get_summary()
+                    return Response(summary, mimetype='text/plain')
+                else:
+                    return jsonify(diag.diagnostics)
+
+            except Exception as e:
+                return jsonify({'error': str(e)}), 500
 
         @app.route('/latest.jpg', methods=['GET'])
         def latest():
@@ -3489,11 +3593,32 @@ class MonitorApp:
         @app.route('/session/summary', methods=['GET'])
         def api_session_summary():
             try:
-                days = int((request.args.get('days') if request else None) or 7)
+                # Determine default days from config if available
+                try:
+                    default_days = int((self.cfg.data.get('ui', {}) or {}).get('session_days_default', 7))
+                except Exception:
+                    default_days = 7
+                days = int((request.args.get('days') if request else None) or default_days)
+                # Debug flag
+                dbg_flag = False
+                try:
+                    d = (request.args.get('debug') or '').strip().lower()
+                    dbg_flag = d in ('1', 'true', 'yes')
+                except Exception:
+                    dbg_flag = False
                 since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days)
                 # Collect from DB (if configured) and file, then merge
                 kpi = {"total_work_ms": 0, "total_break_ms": 0, "avg_work_ms": 0, "sessions_completed": 0}
                 merged: Dict[str, Dict] = {}
+                dbg = {
+                    "work_file_path": None,
+                    "file_exists": False,
+                    "file_count": 0,
+                    "filtered_count": 0,
+                    "db_count": 0,
+                    "final_row_count": 0,
+                    "errors": []
+                }
                 # DB source
                 try:
                     ing = self.cfg.data.get('ingestion', {})
@@ -3512,17 +3637,31 @@ class MonitorApp:
                                         ORDER BY start_ts DESC
                                     """, (int(self.cfg.data.get('emp_id', 0)), since))
                                     recs = cur.fetchall()
+                                    try:
+                                        dbg["db_count"] = len(recs or [])
+                                    except Exception:
+                                        pass
                                     for (st_ts, en_ts, br, wms, bms, tms) in recs:
                                         key = st_ts.isoformat()
                                         merged[key] = {"start_ts": key, "end_ts": (en_ts.isoformat() if en_ts else None), "breaks": br, "work_ms": int(wms or 0), "break_ms": int(bms or 0), "total_ms": int(tms or 0)}
                 except Exception as e:
                     Alerts.log(f"work session summary db error: {e}")
+                    try:
+                        dbg["errors"].append(f"db: {e}")
+                    except Exception:
+                        pass
                 # File source (always merge)
                 try:
                     p = _work_file_path()
+                    dbg["work_file_path"] = p
+                    dbg["file_exists"] = os.path.exists(p)
                     if os.path.exists(p):
                         with open(p, 'r', encoding='utf-8') as f:
                             arr = json.load(f)
+                            try:
+                                dbg["file_count"] = len(arr or [])
+                            except Exception:
+                                pass
                             for r in arr:
                                 try:
                                     st = r.get('start_ts')
@@ -3530,6 +3669,11 @@ class MonitorApp:
                                         continue
                                     if dt.datetime.fromisoformat(st).replace(tzinfo=None) < since.replace(tzinfo=None):
                                         continue
+                                    # counted as filtered candidate
+                                    try:
+                                        dbg["filtered_count"] += 1
+                                    except Exception:
+                                        pass
                                     key = st
                                     # Prefer DB entry when present; otherwise take file
                                     if key not in merged:
@@ -3545,6 +3689,10 @@ class MonitorApp:
                                     continue
                 except Exception as e:
                     Alerts.log(f"work session summary file error: {e}")
+                    try:
+                        dbg["errors"].append(f"file: {e}")
+                    except Exception:
+                        pass
                 # Finalize rows sorted by start_ts desc
                 rows = sorted(merged.values(), key=lambda x: x.get('start_ts') or '', reverse=True)
                 if rows:
@@ -3552,7 +3700,24 @@ class MonitorApp:
                     kpi['total_work_ms'] = sum(int(r.get('work_ms') or 0) for r in rows)
                     kpi['total_break_ms'] = sum(int(r.get('break_ms') or 0) for r in rows)
                     kpi['avg_work_ms'] = int(kpi['total_work_ms'] / max(1, kpi['sessions_completed']))
-                return jsonify({"ok": True, "kpi": kpi, "rows": rows})
+                try:
+                    dbg["final_row_count"] = len(rows or [])
+                except Exception:
+                    pass
+                # CamelCase KPI aliases for UI compatibility
+                try:
+                    kpi.update({
+                        'totalWorkMs': kpi.get('total_work_ms', 0),
+                        'totalBreakMs': kpi.get('total_break_ms', 0),
+                        'avgWorkMs': kpi.get('avg_work_ms', 0),
+                        'sessionsCompleted': kpi.get('sessions_completed', 0)
+                    })
+                except Exception:
+                    pass
+                resp = {"ok": True, "kpi": kpi, "rows": rows}
+                if dbg_flag:
+                    resp["debug"] = dbg
+                return jsonify(resp)
             except Exception as e:
                 return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -4072,7 +4237,15 @@ class IngestionBuffer:
         if not cfg.get('enabled', True):
             self.buf.clear()
             return
-        if len(self.buf) >= int(cfg.get('batch_size', 200)) or (time.time() - self.last_flush) >= int(cfg.get('flush_interval_sec', 5)):
+
+        batch_size = int(cfg.get('batch_size', 200))
+        # Prevent unbounded growth - force flush if buffer exceeds 2x batch size
+        if len(self.buf) >= (batch_size * 2):
+            Alerts.log(f"Force flushing oversized buffer: {len(self.buf)} records")
+            self.flush()
+            return
+
+        if len(self.buf) >= batch_size or (time.time() - self.last_flush) >= int(cfg.get('flush_interval_sec', 5)):
             self.flush()
 
     def flush(self, force: bool = False):

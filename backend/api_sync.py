@@ -35,7 +35,8 @@ class APISync:
         self.api_key = env_key or config_key
 
         self.batch_size = ing_cfg.get('batch_size', 200)
-        self.timeout = 30  # seconds
+        self.timeout = 30  # seconds for API requests
+        self.screenshot_timeout = 90  # seconds for screenshot uploads (larger files)
 
         # Validate and log configuration
         if not self.base_url:
@@ -654,35 +655,109 @@ class APISync:
         finally:
             conn.close()
 
-    def _upload_screenshot_file(self, file_path: str, file_name: str, emp_id: int, captured_at: str) -> bool:
-        """Upload a single screenshot file to the API"""
+    def _upload_screenshot_file(self, file_path: str, file_name: str, emp_id: int, captured_at: str,
+                                encrypt: bool = True) -> bool:
+        """Upload a single screenshot file to the API with compression and optional encryption"""
         try:
-            with open(file_path, 'rb') as f:
-                files = {'file': (file_name, f, 'image/jpeg')}
+            # Check if encryption is enabled in config
+            ing_cfg = self.config.get('ingestion', {})
+            screenshot_cfg = ing_cfg.get('screenshot', {})
+            encrypt_enabled = screenshot_cfg.get('encrypt', True) and encrypt
+
+            if encrypt_enabled:
+                # Import encryption module
+                try:
+                    from screenshot_crypto import ScreenshotCrypto
+
+                    # Get encryption key from config or use default
+                    master_key = screenshot_cfg.get('encryption_key', None)
+                    crypto = ScreenshotCrypto(master_key)
+
+                    # Encrypt to memory with compression
+                    encrypted_data, metadata = crypto.encrypt_to_memory(
+                        file_path,
+                        compress=True,
+                        max_size=(1920, 1080),
+                        quality=75
+                    )
+
+                    original_size = metadata.get('original_size', 0)
+                    encrypted_size = metadata.get('encrypted_size', 0)
+
+                    self.log(f"Screenshot encrypted & compressed: {original_size/1024:.1f}KB -> {encrypted_size/1024:.1f}KB")
+
+                    # Upload encrypted data
+                    import io
+                    buffer = io.BytesIO(encrypted_data)
+                    files = {'file': (file_name + '.enc', buffer, 'application/octet-stream')}
+                    data = {
+                        'emp_id': emp_id,
+                        'timestamp': captured_at,
+                        'captured_at': captured_at,
+                        'encrypted': True,
+                        'encryption_version': metadata.get('encryption_version', '1.0.0'),
+                        'metadata': json.dumps(metadata)
+                    }
+
+                except ImportError:
+                    self.log("Encryption module not available, falling back to compression only")
+                    encrypt_enabled = False
+
+            # Fallback to compression only (original behavior)
+            if not encrypt_enabled:
+                import io
+                from PIL import Image
+
+                # Compress image before upload to reduce size and prevent timeouts
+                img = Image.open(file_path)
+
+                # Convert RGBA to RGB if necessary
+                if img.mode == 'RGBA':
+                    img = img.convert('RGB')
+
+                # Resize if too large (max 1920x1080)
+                max_width, max_height = 1920, 1080
+                if img.width > max_width or img.height > max_height:
+                    img.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
+
+                # Compress to JPEG with quality 75 (good balance between size and quality)
+                buffer = io.BytesIO()
+                img.save(buffer, format='JPEG', quality=75, optimize=True)
+                buffer.seek(0)
+
+                original_size = os.path.getsize(file_path)
+                compressed_size = buffer.getbuffer().nbytes
+                compression_ratio = (1 - compressed_size / original_size) * 100
+
+                self.log(f"Screenshot compressed: {original_size/1024:.1f}KB -> {compressed_size/1024:.1f}KB ({compression_ratio:.1f}% reduction)")
+
+                files = {'file': (file_name, buffer, 'image/jpeg')}
                 data = {
                     'emp_id': emp_id,
                     'timestamp': captured_at,
-                    'captured_at': captured_at
+                    'captured_at': captured_at,
+                    'encrypted': False
                 }
 
-                response = requests.post(
-                    f"{self.base_url}/api/upload/screenshot",
-                    files=files,
-                    data=data,
-                    headers={'X-Api-Key': self.api_key},
-                    timeout=self.timeout
-                )
+            # Upload to API
+            response = requests.post(
+                f"{self.base_url}/api/upload/screenshot",
+                files=files,
+                data=data,
+                headers={'X-Api-Key': self.api_key},
+                timeout=self.screenshot_timeout  # Use longer timeout for uploads
+            )
 
-                if response.status_code == 200:
-                    result = response.json()
-                    if result.get('success'):
-                        return True
-                    else:
-                        self.log(f"Screenshot upload failed: {result.get('error', 'Unknown error')}")
-                        return False
+            if response.status_code == 200:
+                result = response.json()
+                if result.get('success'):
+                    return True
                 else:
-                    self.log(f"Screenshot upload HTTP error: {response.status_code}")
+                    self.log(f"Screenshot upload failed: {result.get('error', 'Unknown error')}")
                     return False
+            else:
+                self.log(f"Screenshot upload HTTP error: {response.status_code}")
+                return False
 
         except Exception as e:
             self.log(f"Screenshot file upload error: {e}")
@@ -733,3 +808,146 @@ class APISync:
 
         finally:
             self.sync_lock.release()
+
+    def sync_heartbeat_incremental(self, emp_id: int, cursor_id: Optional[int] = None) -> Dict[str, Any]:
+        """
+        Incremental sync for heartbeat data using cursor-based pagination
+        Prevents memory issues with large datasets
+
+        Args:
+            emp_id: Employee ID
+            cursor_id: Last synced record ID (None = start from beginning)
+
+        Returns:
+            Dict with 'synced_count', 'last_cursor', 'has_more'
+        """
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        try:
+            # Get records after cursor
+            if cursor_id is None:
+                cursor.execute("""
+                    SELECT id, emp_id, ts, status, cpu_percent, memory_percent,
+                           process_name, window_title, domain, url, battery_level,
+                           battery_plugged, geo
+                    FROM heartbeat
+                    WHERE emp_id = ? AND synced = 0
+                    ORDER BY id ASC
+                    LIMIT ?
+                """, (emp_id, self.batch_size))
+            else:
+                cursor.execute("""
+                    SELECT id, emp_id, ts, status, cpu_percent, memory_percent,
+                           process_name, window_title, domain, url, battery_level,
+                           battery_plugged, geo
+                    FROM heartbeat
+                    WHERE emp_id = ? AND synced = 0 AND id > ?
+                    ORDER BY id ASC
+                    LIMIT ?
+                """, (emp_id, cursor_id, self.batch_size))
+
+            records = cursor.fetchall()
+            if not records:
+                return {'synced_count': 0, 'last_cursor': cursor_id, 'has_more': False}
+
+            # Prepare payload
+            heartbeat_records = []
+            record_ids = []
+            last_id = cursor_id
+
+            for row in records:
+                (rec_id, emp_id, ts, status, cpu_percent, memory_percent,
+                 process_name, window_title, domain, url, battery_level,
+                 battery_plugged, geo_json) = row
+
+                # Parse geo JSON if present
+                geo = None
+                if geo_json:
+                    try:
+                        geo = json.loads(geo_json) if isinstance(geo_json, str) else geo_json
+                    except:
+                        pass
+
+                heartbeat_records.append({
+                    'emp_id': emp_id,
+                    'ts': ts,
+                    'cpu_percent': cpu_percent or 0.0,
+                    'mem_percent': memory_percent or 0.0,
+                    'net_sent_mb': 0.0,
+                    'net_recv_mb': 0.0,
+                    'fg_app': process_name or '',
+                    'fg_title': window_title or '',
+                    'idle_sec': 0 if status == 'active' else 60,
+                    'active': status == 'active',
+                    'day_active_sec': 0,
+                    'day_idle_sec': 0,
+                    'work_location': 'remote',
+                    'battery_percent': battery_level,
+                    'battery_plugged': bool(battery_plugged) if battery_plugged is not None else None,
+                    'geo': geo_json if geo_json else None
+                })
+                record_ids.append(rec_id)
+                last_id = rec_id
+
+            # Send to API
+            if self._make_request('/api/ingest/heartbeat', {
+                'emp_id': emp_id,
+                'records': heartbeat_records
+            }):
+                # Mark as synced
+                placeholders = ','.join('?' * len(record_ids))
+                cursor.execute(f"UPDATE heartbeat SET synced = 1 WHERE id IN ({placeholders})", record_ids)
+                conn.commit()
+
+                # Check if more records exist
+                cursor.execute("""
+                    SELECT COUNT(*) FROM heartbeat
+                    WHERE emp_id = ? AND synced = 0 AND id > ?
+                """, (emp_id, last_id))
+                has_more = cursor.fetchone()[0] > 0
+
+                self.log(f"Incremental sync: {len(records)} heartbeat records, cursor={last_id}, has_more={has_more}")
+
+                return {
+                    'synced_count': len(records),
+                    'last_cursor': last_id,
+                    'has_more': has_more
+                }
+            else:
+                return {'synced_count': 0, 'last_cursor': cursor_id, 'has_more': False, 'error': 'API request failed'}
+
+        except Exception as e:
+            self.log(f"Error in incremental heartbeat sync: {e}")
+            return {'synced_count': 0, 'last_cursor': cursor_id, 'has_more': False, 'error': str(e)}
+        finally:
+            conn.close()
+
+    def sync_all_incremental(self, emp_id: int) -> Dict[str, Any]:
+        """
+        Sync all unsynced data using incremental cursor-based approach
+        Better for large datasets - prevents memory issues
+
+        Returns:
+            Dict with sync results for each data type
+        """
+        results = {}
+
+        # Heartbeat sync with cursor
+        cursor_id = None
+        total_heartbeat = 0
+        while True:
+            result = self.sync_heartbeat_incremental(emp_id, cursor_id)
+            total_heartbeat += result.get('synced_count', 0)
+            cursor_id = result.get('last_cursor')
+
+            if not result.get('has_more', False):
+                break
+
+        results['heartbeat'] = total_heartbeat
+        self.log(f"Total heartbeat records synced incrementally: {total_heartbeat}")
+
+        # Other syncs use existing methods (already optimized)
+        results['screenshots'] = self.sync_screenshots(emp_id)
+
+        return results

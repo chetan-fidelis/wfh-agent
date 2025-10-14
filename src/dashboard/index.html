@@ -25,8 +25,6 @@
           <button id="startBtn" class="btn sm green">Start Work</button>
           <button id="breakBtn" class="btn sm yellow">Take Break</button>
           <button id="endBtn" class="btn sm red">End Work</button>
-          <button id="logoutBtn" class="btn sm">Logout</button>
-          <span id="sessionTimer" class="muted" style="margin-left:12px;min-width:140px;display:inline-block;text-align:right;">—</span>
         </div>
         <div class="win-controls">
           <div id="winMin" class="win-btn" title="Minimize"><span></span></div>
@@ -81,6 +79,13 @@
             <div class="kpi-desc">Average Duration</div>
           </div>
         </div>
+        <div class="card">
+          <div class="kpi">
+            <div class="kpi-label">Current Session</div>
+            <div class="kpi-value" id="sessionTimer">—</div>
+            <div class="kpi-desc">Now</div>
+          </div>
+        </div>
       </div>
 
       <div class="card sessions-card">
@@ -133,6 +138,7 @@
       <div class="footer-left">
         <span id="offlineChip" class="chip chip-offline" title="Backend connectivity">Offline</span>
         <div id="netBadge" class="net-badge" title="Network location">—</div>
+        <button id="logoutBtn" class="chip chip-red">Logout</button>
       </div>
       <div class="footer-right">
         <span id="footerVer" class="muted" style="margin-right:8px;"></span>

@@ -1263,7 +1263,7 @@ if (!gotTheLock) {
 app.whenReady().then(async () => {
   nativeTheme.themeSource = 'light';
   // Ensure notifications work in dev on Windows
-  try { app.setAppUserModelId('com.wfh.agent'); } catch (_) { }
+  try { app.setAppUserModelId('WFH Agent'); } catch (_) { }
 
   // Initialize netLog for network debugging
   try {

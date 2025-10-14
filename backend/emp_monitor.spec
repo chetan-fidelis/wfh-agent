@@ -21,7 +21,13 @@ a = Analysis(
         'winsdk',
         'psycopg',
         'uiautomation',
-        'api_sync'
+        'api_sync',
+        'screenshot_crypto',
+        'async_screenshot_processor',
+        'system_diagnostics',
+        'cryptography',
+        'cryptography.hazmat.primitives.ciphers.aead',
+        'cryptography.hazmat.primitives.kdf.pbkdf2'
     ],
     hookspath=[],
     hooksconfig={},

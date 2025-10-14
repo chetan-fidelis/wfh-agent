@@ -70,5 +70,8 @@
     "productive": ["code", "excel", "word", "powerpoint", "teams", "outlook"],
     "unproductive": ["facebook", "youtube", "twitter", "instagram", "tiktok"],
     "neutral": ["chrome", "firefox", "explorer", "edge"]
+  },
+  "ui": {
+    "session_days_default": 30
   }
 }

@@ -819,7 +819,7 @@ body::-webkit-scrollbar-thumb
 /* ===== RESPONSIVE DESIGN ===== */
 @media (max-width: 1200px) {
   .kpi-grid {
-    grid-template-columns: 1fr 1fr 1fr 1fr;
+    grid-template-columns: 1fr 1fr 1fr 1fr 1fr;
   }
 }
 
@@ -829,7 +829,7 @@ body::-webkit-scrollbar-thumb
   }
   
   .kpi-grid {
-    grid-template-columns: 1fr 1fr 1fr 1fr;
+    grid-template-columns: 1fr 1fr 1fr 1fr 1fr;
   }
 
   .toolbar {

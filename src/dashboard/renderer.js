@@ -235,7 +235,10 @@
 
   async function refreshSummary() {
     const cfg = await window.api.getConfig();
-    const days = parseInt(rangeSel ? rangeSel.value : '7', 10) || 7;
+    const defaultDays = (cfg && cfg.ui && Number.isFinite(parseInt(cfg.ui.session_days_default)))
+      ? parseInt(cfg.ui.session_days_default, 10)
+      : 7;
+    const days = parseInt(rangeSel ? rangeSel.value : String(defaultDays), 10) || defaultDays;
     const res = await window.api.get(`/session/summary?days=${days}`, cfg.serverUrl);
     if (res.ok && res.data) {
       const k = res.data.kpi || {};
