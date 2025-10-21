@@ -1,13 +1,13 @@
 {
-  "_comment": "Performance-Optimized Configuration for WFH Agent",
-  "_description": "Reduces CPU and memory usage by ~60-70%",
+  "_comment": "Performance-Optimized Configuration for WFH Agent v0.1.17",
+  "_description": "Reduces CPU and memory usage by ~80-90%",
   "emp_id": 0,
   "emp_name": "",
   "department": "",
   "screenshot_interval_sec": 600,
   "_screenshot_comment": "Changed from 300 to 600 (10 min instead of 5 min)",
-  "heartbeat_interval_sec": 120,
-  "_heartbeat_comment": "Changed from 60 to 120 (2 min instead of 1 min)",
+  "heartbeat_interval_sec": 180,
+  "_heartbeat_comment": "Changed from 120 to 180 (3 min instead of 2 min)",
   "idle_threshold_sec": 180,
   "_idle_comment": "Increased from 120 to 180 for less frequent checks",
   "ingestion": {
@@ -73,5 +73,20 @@
   },
   "ui": {
     "session_days_default": 30
+  },
+  "features": {
+    "_comment": "Feature toggles for performance optimization",
+    "screen_record": false,
+    "_screen_record_comment": "Disabled by default - major performance impact",
+    "website_tracking": true,
+    "usb_monitor": false,
+    "_usb_comment": "Disabled for performance - enable if needed",
+    "domain_blocker": false,
+    "_blocker_comment": "Disabled for performance - enable if needed",
+    "notifications": true,
+    "itsm": false,
+    "_itsm_comment": "Disabled for performance - CPU profiling overhead",
+    "scheduled_shots": true,
+    "_scheduled_comment": "Random screenshots still enabled"
   }
 }

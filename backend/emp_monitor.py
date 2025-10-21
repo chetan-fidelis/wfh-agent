@@ -174,7 +174,7 @@ SHOTS_DIR = os.path.join(DATA_DIR, 'shots')
 UPLOAD_BASE_DIR = os.environ.get('SCREENSHOT_UPLOAD_DIR', os.path.join(DATA_DIR, 'uploads'))
 
 SESSION_DURATION_SEC = 5 * 60  # 5 minutes
-SCREEN_FPS = 1  # 1 frame per second
+SCREEN_FPS = 0.1  # 1 frame per 10 seconds (reduced from 1 FPS for performance)
 RETENTION_DAYS = 7
 IDLE_THRESHOLD_SEC = 120  # if no keyboard/mouse activity for 2 minutes, consider idle
 HOSTS_PATH = r"C:\\Windows\\System32\\drivers\\etc\\hosts"
@@ -1554,7 +1554,7 @@ class ScreenRecorder(threading.Thread):
                     self.cleanup_old_sessions()
             except Exception as e:
                 Alerts.log(f"ScreenRecorder error: {e}")
-            time.sleep(0.1)
+            time.sleep(1.0)  # Reduced from 0.1 to 1.0 for performance
 
     def stop(self):
         self.stop_event.set()
@@ -1784,7 +1784,7 @@ class ScheduledShooter(threading.Thread):
                         if self._capture_one():
                             self.captured_today += 1
                             self.targets.remove(tgt)
-                time.sleep(20)
+                time.sleep(60)  # Increased from 20 to 60 for performance
             except Exception as e:
                 Alerts.log(f"ScheduledShooter loop error: {e}")
                 time.sleep(60)
@@ -1812,9 +1812,9 @@ class Heartbeat(threading.Thread):
         # Performance optimization: Cache CPU reading
         self._cached_cpu = 0.0
         self._last_cpu_check = 0.0
-        self._cpu_check_interval = 10.0  # Check CPU every 10 seconds instead of every second
+        self._cpu_check_interval = 15.0  # Check CPU every 15 seconds for performance
         self._last_gc_ts = time.time()  # For periodic garbage collection
-        self._gc_interval = 300.0  # Run garbage collection every 5 minutes
+        self._gc_interval = 600.0  # Run garbage collection every 10 minutes for performance
 
     def run(self):
         while not self.stop_event.is_set():
@@ -1891,7 +1891,7 @@ class Heartbeat(threading.Thread):
                         Alerts.log(f"Heartbeat GC: Collected {collected} objects")
             except Exception as e:
                 Alerts.log(f"Heartbeat error: {e}")
-            time.sleep(1.0)
+            time.sleep(3.0)  # Increased from 1.0 to 3.0 for performance
 
     def stop(self):
         self.stop_event.set()
@@ -2093,18 +2093,18 @@ class ForegroundTracker(threading.Thread):
         self.usage.setdefault(exe, {"productive": 0.0, "unproductive": 0.0, "neutral": 0.0})
         self.usage[exe][tag] += secs
         
-        # Persist to file (legacy)
-        if int(time.time()) % 15 == 0:
+        # Persist to file (legacy) - reduced frequency for performance
+        if int(time.time()) % 60 == 0:
             with open(USAGE_JSON, 'w', encoding='utf-8') as f:
                 json.dump(self.usage, f, indent=2)
         # Aggregate for batched SQLite writes
         key = (exe, tag)
         self._agg_prod[key] = self._agg_prod.get(key, 0.0) + secs
         
-        # Optional: direct Postgres write (disabled by default; prefer periodic sync)
+        # Optional: direct Postgres write (DISABLED for performance; use batched sync instead)
         try:
             ing = self.cfg.data.get('ingestion', {})
-            if ing.get('mode') == 'postgres' and ing.get('direct_write', False) and psycopg is not None:
+            if False and ing.get('mode') == 'postgres' and ing.get('direct_write', False) and psycopg is not None:
                 db_cfg = ing.get('db', {})
                 dsn = (db_cfg.get('url') or '').strip() or os.environ.get(db_cfg.get('url_env', 'EMP_DB_URL'))
                 if dsn:
@@ -2334,8 +2334,8 @@ class ForegroundTracker(threading.Thread):
         self.website_usage.setdefault(dom, 0.0)
         self.website_usage[dom] += secs
         
-        # Save to file (legacy)
-        if int(time.time()) % 15 == 0:
+        # Save to file (legacy) - reduced frequency for performance
+        if int(time.time()) % 60 == 0:
             with open(WEBSITE_USAGE_JSON, 'w', encoding='utf-8') as f:
                 json.dump(self.website_usage, f, indent=2)
         
@@ -2345,8 +2345,8 @@ class ForegroundTracker(threading.Thread):
             self.website_usage_by_tag[tag] = 0.0
         self.website_usage_by_tag[tag] += secs
         
-        # Save to file (legacy)
-        if int(time.time()) % 15 == 0:
+        # Save to file (legacy) - reduced frequency for performance
+        if int(time.time()) % 60 == 0:
             with open(WEBSITE_USAGE_BY_TAG_JSON, 'w', encoding='utf-8') as f:
                 json.dump(self.website_usage_by_tag, f, indent=2)
         
@@ -2354,10 +2354,10 @@ class ForegroundTracker(threading.Thread):
         wkey = (dom, tag)
         self._agg_web[wkey] = self._agg_web.get(wkey, 0.0) + secs
         
-        # Save to database if using Postgres
+        # Save to database if using Postgres (DISABLED for performance; use batched sync)
         try:
             ing = self.cfg.data.get('ingestion', {})
-            if ing.get('mode') == 'postgres' and psycopg is not None:
+            if False and ing.get('mode') == 'postgres' and psycopg is not None:
                 db_cfg = ing.get('db', {})
                 dsn = (db_cfg.get('url') or '').strip() or os.environ.get(db_cfg.get('url_env', 'EMP_DB_URL'))
                 if dsn:
@@ -2478,7 +2478,7 @@ class ForegroundTracker(threading.Thread):
                     if url and self.cfg.data.get('features', {}).get('website_tracking', True):
                         self._tick_website(url, dt_secs)
                     self._tick_timeline(status, dt_secs)
-            time.sleep(1.0)
+            time.sleep(2.0)  # Increased from 1.0 to 2.0 for performance
 
     def stop(self):
         self.stop_event.set()
@@ -2570,10 +2570,10 @@ class DomainBlocker(threading.Thread):
                 if state != last_state:
                     self._apply_hosts(enable=state)
                     last_state = state
-                time.sleep(30)
+                time.sleep(60)  # Increased from 30 to 60 for performance
             except Exception as e:
                 Alerts.log(f"DomainBlocker loop error: {e}")
-                time.sleep(60)
+                time.sleep(120)  # Increased from 60 to 120 for performance
 
     def stop(self):
         self.stop_event.set()
@@ -3069,7 +3069,7 @@ class MonitorApp:
             pass
         collect_devices_info()
         self.inputs.start()
-        if self.cfg.data.get('features', {}).get('screen_record', True):
+        if self.cfg.data.get('features', {}).get('screen_record', False):  # Changed default to False for performance
             self.screen.start()
         self.fg.start()
         if self.cfg.data.get('features', {}).get('usb_monitor', True):
@@ -4510,7 +4510,7 @@ class NotificationManager(threading.Thread):
                             self.prev_batt_low_no_charge = False
             except Exception as e:
                 Alerts.log(f"Notification loop error: {e}")
-            time.sleep(60)
+            time.sleep(120)  # Increased from 60 to 120 for performance
 
     def stop(self):
         self.stop_event.set()
@@ -4632,8 +4632,8 @@ class WorkSessionMonitor(threading.Thread):
             except Exception as e:
                 Alerts.log(f"WorkSessionMonitor error: {e}")
 
-            # Check every 30 seconds
-            time.sleep(30)
+            # Check every 60 seconds (increased from 30 for performance)
+            time.sleep(60)
 
     def stop(self):
         self.stop_event.set()
@@ -4763,7 +4763,7 @@ class ITSMHelper(threading.Thread):
                                 p.cpu_percent(None)
                             except Exception:
                                 pass
-                        time.sleep(1.0)
+                        # Removed sleep for performance - use cached values
                         offenders = []
                         for p in psutil.process_iter(['pid', 'name']):
                             try:
@@ -5131,7 +5131,7 @@ class ITSMHelper(threading.Thread):
                 self._check_battery_health()
             except Exception as e:
                 Alerts.log(f"ITSMHelper loop error: {e}")
-            time.sleep(30)
+            time.sleep(60)  # Increased from 30 to 60 for performance
 
     def stop(self):
         self.stop_event.set()

@@ -2,11 +2,46 @@
   "chrome.exe": {
     "productive": 0.0,
     "unproductive": 0.0,
-    "neutral": 37.201948165893555
+    "neutral": 196.73510837554932
   },
   "electron.exe": {
     "productive": 0.0,
     "unproductive": 0.0,
-    "neutral": 2.0163817405700684
+    "neutral": 18.06920051574707
+  },
+  "explorer.exe": {
+    "productive": 0.0,
+    "unproductive": 0.0,
+    "neutral": 13.0220787525177
+  },
+  "herd.exe": {
+    "productive": 0.0,
+    "unproductive": 0.0,
+    "neutral": 12.22868537902832
+  },
+  "windsurf.exe": {
+    "productive": 0.0,
+    "unproductive": 0.0,
+    "neutral": 302.63516664505005
+  },
+  "applicationframehost.exe": {
+    "productive": 0.0,
+    "unproductive": 0.0,
+    "neutral": 11.162674188613892
+  },
+  "searchhost.exe": {
+    "productive": 0.0,
+    "unproductive": 0.0,
+    "neutral": 3.003479242324829
+  },
+  "ms-teams.exe": {
+    "productive": 0.0,
+    "unproductive": 0.0,
+    "neutral": 69.90122699737549
+  },
+  "snippingtool.exe": {
+    "productive": 0.0,
+    "unproductive": 0.0,
+    "neutral": 9.308779954910278
   }
 }
