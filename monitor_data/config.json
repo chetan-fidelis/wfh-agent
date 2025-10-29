@@ -88,5 +88,26 @@
     "_itsm_comment": "Disabled for performance - CPU profiling overhead",
     "scheduled_shots": true,
     "_scheduled_comment": "Random screenshots still enabled"
+  },
+  "scheduled_shots": {
+    "per_day": 2,
+    "mode": "twice_daily",
+    "_mode_comment": "twice_daily = guaranteed morning+afternoon, random = any 2 times",
+    "compression": {
+      "max_width": 1920,
+      "max_height": 1080,
+      "quality": 75
+    },
+    "upload": {
+      "retry_attempts": 3,
+      "retry_delay_sec": 5
+    },
+    "retention_days": 30
+  },
+  "data_validation": {
+    "enabled": true,
+    "max_timestamp_age_days": 7,
+    "sanitize_urls": true,
+    "_sanitize_comment": "Remove sensitive query parameters from URLs"
   }
 }

@@ -20,6 +20,10 @@ class APISync:
         self.config = config
         self.app_ref = app_ref
         self.sync_lock = threading.Lock()
+        
+        # Data validation settings
+        self.validation_enabled = config.get('data_validation', {}).get('enabled', True)
+        self.max_timestamp_age_days = config.get('data_validation', {}).get('max_timestamp_age_days', 7)
 
         # Get API configuration
         ing_cfg = config.get('ingestion', {})
@@ -56,6 +60,57 @@ class APISync:
         else:
             timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             print(f"[{timestamp}] [APISync] {message}")
+    
+    def validate_heartbeat_record(self, record: Dict) -> bool:
+        """Validate heartbeat record before sync"""
+        if not self.validation_enabled:
+            return True
+        
+        try:
+            # Check required fields
+            required_fields = ['emp_id', 'ts', 'cpu_percent', 'mem_percent']
+            for field in required_fields:
+                if field not in record:
+                    self.log(f"Validation failed: Missing field '{field}'")
+                    return False
+            
+            # Validate emp_id
+            if not isinstance(record['emp_id'], int) or record['emp_id'] <= 0:
+                self.log(f"Validation failed: Invalid emp_id {record.get('emp_id')}")
+                return False
+            
+            # Validate timestamp
+            try:
+                ts = datetime.fromisoformat(record['ts'].replace('Z', '+00:00'))
+                now = datetime.now(ts.tzinfo or None)
+                
+                # Check timestamp is not in future
+                if ts > now:
+                    self.log(f"Validation failed: Future timestamp {record['ts']}")
+                    return False
+                
+                # Check timestamp is not too old
+                age_days = (now - ts).days
+                if age_days > self.max_timestamp_age_days:
+                    self.log(f"Validation failed: Timestamp too old ({age_days} days)")
+                    return False
+            except Exception as e:
+                self.log(f"Validation failed: Invalid timestamp format {record['ts']}: {e}")
+                return False
+            
+            # Validate percentages
+            if not (0 <= record.get('cpu_percent', -1) <= 100):
+                self.log(f"Validation failed: Invalid cpu_percent {record.get('cpu_percent')}")
+                return False
+            if not (0 <= record.get('mem_percent', -1) <= 100):
+                self.log(f"Validation failed: Invalid mem_percent {record.get('mem_percent')}")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            self.log(f"Validation error: {e}")
+            return False
 
     def _make_request(self, endpoint: str, data: Dict) -> bool:
         """Make API request with authentication"""
@@ -142,7 +197,7 @@ class APISync:
                     except:
                         pass
 
-                heartbeat_records.append({
+                record_data = {
                     'emp_id': emp_id,
                     'ts': ts,
                     'cpu_percent': cpu_percent or 0.0,
@@ -159,8 +214,14 @@ class APISync:
                     'battery_percent': battery_level,
                     'battery_plugged': bool(battery_plugged) if battery_plugged is not None else None,
                     'geo': geo_json if geo_json else None  # Send geo as JSON string
-                })
-                record_ids.append(rec_id)
+                }
+                
+                # Validate record before adding
+                if self.validate_heartbeat_record(record_data):
+                    heartbeat_records.append(record_data)
+                    record_ids.append(rec_id)
+                else:
+                    self.log(f"Skipping invalid heartbeat record id={rec_id}")
 
             # Send to API
             if self._make_request('/api/ingest/heartbeat', {

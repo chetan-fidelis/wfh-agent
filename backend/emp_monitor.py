@@ -1577,20 +1577,43 @@ class ScheduledShooter(threading.Thread):
     def _randomize_today(self):
         cfg = self.app.cfg.data.get('scheduled_shots', {})
         per_day = int(cfg.get('per_day', 2))
-        start_s = cfg.get('start', '09:30')
-        end_s = cfg.get('end', '18:30')
+        mode = cfg.get('mode', 'twice_daily')  # 'twice_daily' or 'random'
         today = dt.datetime.now().date()
-        st = dt.datetime.combine(today, dt.datetime.strptime(start_s, '%H:%M').time())
-        et = dt.datetime.combine(today, dt.datetime.strptime(end_s, '%H:%M').time())
-        if et <= st:
-            et = st + dt.timedelta(hours=9)
-        # pick unique random minutes
         import random
         self.targets = []
-        span_sec = (et - st).total_seconds()
-        picks = sorted(random.sample(range(int(span_sec)), k=max(1, per_day)))
-        for p in picks:
-            self.targets.append(st + dt.timedelta(seconds=p))
+        
+        if mode == 'twice_daily' and per_day == 2:
+            # Guaranteed morning + afternoon distribution
+            # Morning window: 9:30 AM - 12:30 PM
+            morning_start = dt.datetime.combine(today, dt.time(9, 30))
+            morning_end = dt.datetime.combine(today, dt.time(12, 30))
+            morning_seconds = int((morning_end - morning_start).total_seconds())
+            morning_offset = random.randint(0, morning_seconds)
+            morning_time = morning_start + dt.timedelta(seconds=morning_offset)
+            
+            # Afternoon window: 2:00 PM - 5:30 PM
+            afternoon_start = dt.datetime.combine(today, dt.time(14, 0))
+            afternoon_end = dt.datetime.combine(today, dt.time(17, 30))
+            afternoon_seconds = int((afternoon_end - afternoon_start).total_seconds())
+            afternoon_offset = random.randint(0, afternoon_seconds)
+            afternoon_time = afternoon_start + dt.timedelta(seconds=afternoon_offset)
+            
+            self.targets = [morning_time, afternoon_time]
+            Alerts.log(f"Scheduled screenshots: Morning {morning_time.strftime('%H:%M')}, Afternoon {afternoon_time.strftime('%H:%M')}")
+        else:
+            # Legacy random mode - pick N random times across work hours
+            start_s = cfg.get('start', '09:30')
+            end_s = cfg.get('end', '18:30')
+            st = dt.datetime.combine(today, dt.datetime.strptime(start_s, '%H:%M').time())
+            et = dt.datetime.combine(today, dt.datetime.strptime(end_s, '%H:%M').time())
+            if et <= st:
+                et = st + dt.timedelta(hours=9)
+            span_sec = (et - st).total_seconds()
+            picks = sorted(random.sample(range(int(span_sec)), k=max(1, per_day)))
+            for p in picks:
+                self.targets.append(st + dt.timedelta(seconds=p))
+            Alerts.log(f"Scheduled {per_day} random screenshots")
+        
         self.captured_today = 0
 
     def _cleanup_old(self):
@@ -1613,14 +1636,37 @@ class ScheduledShooter(threading.Thread):
                 img = sct.grab(sct.monitors[0])
                 ts = dt.datetime.now().strftime('%Y%m%d_%H%M%S')
                 out_path = os.path.join(SHOTS_DIR, f"shot_{ts}.jpg")
-                Image.frombytes('RGB', img.size, img.rgb).save(out_path, 'JPEG', quality=70)
+                
+                # Convert to PIL Image for compression and resizing
+                pil_img = Image.frombytes('RGB', img.size, img.rgb)
+                
+                # Get compression settings from config
+                cfg = self.app.cfg.data.get('scheduled_shots', {})
+                compression = cfg.get('compression', {})
+                max_width = compression.get('max_width', 1920)
+                max_height = compression.get('max_height', 1080)
+                quality = compression.get('quality', 75)
+                
+                # Resize if too large (reduces file size significantly)
+                original_size = pil_img.size
+                if pil_img.width > max_width or pil_img.height > max_height:
+                    pil_img.thumbnail((max_width, max_height), Image.Resampling.LANCZOS)
+                    Alerts.log(f"Screenshot resized: {original_size} -> {pil_img.size}")
+                
+                # Save with optimized compression
+                pil_img.save(out_path, 'JPEG', quality=quality, optimize=True)
+                
+                # Log file size
+                file_size_kb = os.path.getsize(out_path) / 1024
+                Alerts.log(f"Screenshot saved: {file_size_kb:.1f} KB")
+                
                 try:
                     shutil.copyfile(out_path, LATEST_JPG)
                 except Exception:
                     pass
 
-                # Upload screenshot to server if configured
-                self._upload_screenshot(out_path, ts)
+                # Upload screenshot to server with retry
+                self._upload_screenshot_with_retry(out_path, ts)
 
                 Alerts.log(f"Scheduled shot captured: {out_path}")
                 return True
@@ -1628,7 +1674,55 @@ class ScheduledShooter(threading.Thread):
             Alerts.log(f"Scheduled shot error: {e}")
         return False
 
-    def _upload_screenshot(self, file_path: str, timestamp: str):
+    def _upload_screenshot_with_retry(self, file_path: str, timestamp: str, max_attempts: int = 3):
+        """Upload screenshot with retry mechanism"""
+        cfg = self.app.cfg.data.get('scheduled_shots', {}).get('upload', {})
+        max_attempts = cfg.get('retry_attempts', 3)
+        retry_delay = cfg.get('retry_delay_sec', 5)
+        
+        for attempt in range(max_attempts):
+            try:
+                success = self._upload_screenshot(file_path, timestamp)
+                if success:
+                    Alerts.log(f"Screenshot uploaded successfully on attempt {attempt + 1}")
+                    return True
+                if attempt < max_attempts - 1:
+                    Alerts.log(f"Upload attempt {attempt + 1} failed, retrying in {retry_delay}s...")
+                    time.sleep(retry_delay)
+            except Exception as e:
+                Alerts.log(f"Upload attempt {attempt + 1} error: {e}")
+                if attempt < max_attempts - 1:
+                    time.sleep(retry_delay)
+        
+        # All attempts failed - queue for later retry
+        Alerts.log(f"All {max_attempts} upload attempts failed, queuing for later")
+        self._queue_failed_upload(file_path, timestamp)
+        return False
+    
+    def _queue_failed_upload(self, file_path: str, timestamp: str):
+        """Queue failed upload for retry"""
+        queue_file = os.path.join(DATA_DIR, 'screenshot_upload_queue.json')
+        try:
+            queue = []
+            if os.path.exists(queue_file):
+                with open(queue_file, 'r', encoding='utf-8') as f:
+                    queue = json.load(f)
+            
+            queue.append({
+                'file_path': file_path,
+                'timestamp': timestamp,
+                'queued_at': dt.datetime.now().isoformat(),
+                'attempts': 0
+            })
+            
+            with open(queue_file, 'w', encoding='utf-8') as f:
+                json.dump(queue, f, indent=2)
+            
+            Alerts.log(f"Screenshot queued for retry: {os.path.basename(file_path)}")
+        except Exception as e:
+            Alerts.log(f"Failed to queue upload: {e}")
+    
+    def _upload_screenshot(self, file_path: str, timestamp: str) -> bool:
         """Upload screenshot to server if configured and store metadata in database"""
         try:
             emp_id = int(self.app.cfg.data.get('emp_id', 0))
@@ -1654,10 +1748,11 @@ class ScheduledShooter(threading.Thread):
                     if success and self.app.local_storage:
                         # Update upload status in local storage
                         self.app.local_storage.update_screenshot_upload(emp_id, file_name, f"api://{file_name}")
-                    return
+                    return success
                 except Exception as e:
                     Alerts.log(f"API screenshot upload error: {e}")
                     # Fall through to legacy upload method if API fails
+                    return False
 
             # Store in database if using direct Postgres
             if ing.get('mode') == 'postgres' and psycopg is not None:
@@ -2050,14 +2145,60 @@ class ForegroundTracker(threading.Thread):
         self.cfg = cfg
         self.app_ref = app_ref
         self.stop_event = threading.Event()
-        self.current: Dict[str, str] = {"window": "", "process": "", "status": "unknown", "url": ""}
-        self.usage: Dict[str, Dict[str, float]] = {}  # process -> {productive|unproductive|neutral: seconds}
-        self.timeline: Dict[str, Dict[str, int]] = {}  # date -> {hour -> active/idle/offline counts seconds}
-        self.website_usage: Dict[str, float] = {}  # domain -> seconds
-        self.website_usage_by_tag: Dict[str, float] = {"productive": 0.0, "unproductive": 0.0, "neutral": 0.0}
+        self.current: Dict = {}
+        self.usage: Dict = {}  # {exe: {productive: secs, unproductive: secs, neutral: secs}}
+        self.website_usage: Dict = {}  # {domain: total_secs}
+        self.website_usage_by_tag: Dict = {}  # {tag: total_secs}
+        self._agg_prod: Dict = {}  # {(exe, tag): secs} for batched SQLite writes
+        self._agg_web: Dict = {}  # {(domain, tag): secs} for batched SQLite writes
         self._uia_initialized = False
-        self._is_on_break = False
-        # Aggregation buffers for batched writes
+        # Timeline tracking structures
+        self.timeline: Dict = {}
+        self._agg_timeline: Dict = {}  # {(date, hour, status): secs}
+        
+        # URL sanitization settings
+        self.sanitize_urls = cfg.data.get('data_validation', {}).get('sanitize_urls', True)
+    
+    def _sanitize_url(self, url: str) -> str:
+        """Remove sensitive data from URLs"""
+        if not url or not self.sanitize_urls:
+            return url
+        
+        try:
+            from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+            
+            parsed = urlparse(url)
+            
+            # Remove sensitive query parameters
+            sensitive_params = ['token', 'key', 'password', 'secret', 'api_key', 
+                               'access_token', 'session', 'auth', 'credential', 'jwt',
+                               'bearer', 'apikey', 'api-key', 'authorization']
+            
+            query_params = parse_qs(parsed.query)
+            filtered_params = {
+                k: v for k, v in query_params.items() 
+                if not any(sensitive in k.lower() for sensitive in sensitive_params)
+            }
+            
+            # Rebuild URL
+            clean_query = urlencode(filtered_params, doseq=True)
+            clean_url = urlunparse((
+                parsed.scheme,
+                parsed.netloc,
+                parsed.path,
+                parsed.params,
+                clean_query,
+                ''  # Remove fragment
+            ))
+            
+            return clean_url
+            
+        except Exception:
+            # If parsing fails, return domain only
+            try:
+                return urlparse(url).netloc
+            except:
+                return ''
         self._agg_prod: Dict[Tuple[str, str], float] = {}            # (exe, tag) -> secs
         self._agg_timeline: Dict[Tuple[str, str, str], int] = {}     # (date, hour, status) -> secs
         self._agg_web: Dict[Tuple[str, str], float] = {}             # (domain, tag) -> secs
@@ -2466,6 +2607,11 @@ class ForegroundTracker(threading.Thread):
             if not url and exe in ("chrome.exe", "msedge.exe", "firefox.exe") and title:
                 # Fallback: infer from title without needing browser flags
                 url = self._infer_url_from_title(title)
+            
+            # Sanitize URL to remove sensitive data
+            if url:
+                url = self._sanitize_url(url)
+            
             self.current = {"window": title, "process": exe, "status": status, "url": url}
             now = time.time()
             dt_secs = now - last_ts
@@ -3398,12 +3544,32 @@ class MonitorApp:
             except Exception:
                 return 0
 
-        def _sum_break_ms(breaks: List[Dict]) -> int:
+        def _sum_break_ms(breaks: List[Dict], session_start_ts: str, session_end_ts: str) -> int:
+            """Sum break durations, clamped within the session window to avoid over-counting."""
+            try:
+                ss = dt.datetime.fromisoformat(session_start_ts)
+                se = dt.datetime.fromisoformat(session_end_ts)
+            except Exception:
+                # Fallback: no clamping if timestamps invalid
+                ss, se = None, None
             total = 0
             for br in breaks or []:
                 st, en = br.get('start_ts'), br.get('end_ts')
-                if st and en:
-                    total += _dur_ms(st, en)
+                if not (st and en):
+                    continue
+                try:
+                    bst = dt.datetime.fromisoformat(st)
+                    ben = dt.datetime.fromisoformat(en)
+                    # Clamp to session window if available
+                    if ss and se:
+                        if bst < ss:
+                            bst = ss
+                        if ben > se:
+                            ben = se
+                    if ben > bst:
+                        total += int((ben - bst).total_seconds() * 1000)
+                except Exception:
+                    continue
             return total
 
         def _auto_end_session(reason: str = "auto_stop") -> Dict:
@@ -3420,7 +3586,8 @@ class MonitorApp:
             start_ts = self._work_session.get('start_ts')
             end_ts = self._work_session.get('end_ts')
             total_ms = _dur_ms(start_ts, end_ts)
-            break_ms = _sum_break_ms(brks)
+            break_ms = _sum_break_ms(brks, start_ts, end_ts)
+
             work_ms = max(0, total_ms - break_ms)
 
             rec = {
@@ -3557,7 +3724,8 @@ class MonitorApp:
                 start_ts = self._work_session.get('start_ts')
                 end_ts = self._work_session.get('end_ts')
                 total_ms = _dur_ms(start_ts, end_ts)
-                break_ms = _sum_break_ms(brks)
+                break_ms = _sum_break_ms(brks, start_ts, end_ts)
+
                 work_ms = max(0, total_ms - break_ms)
                 rec = {
                     "emp_id": int(self.cfg.data.get('emp_id', 0)),
@@ -4540,13 +4708,16 @@ class WorkSessionMonitor(threading.Thread):
     def run(self):
         while not self.stop_event.is_set():
             try:
-                now = dt.datetime.now()
+                # Use UTC-aware timestamps consistently
+                now = dt.datetime.now(dt.timezone.utc)
                 session = self.app._work_session
 
                 # Check if there's an active session
                 if session and session.get('start_ts') and not session.get('end_ts'):
                     start_dt = dt.datetime.fromisoformat(session['start_ts'])
-                    duration_ms = int((now - start_dt.replace(tzinfo=None)).total_seconds() * 1000)
+                    if start_dt.tzinfo is None:
+                        start_dt = start_dt.replace(tzinfo=dt.timezone.utc)
+                    duration_ms = int((now - start_dt).total_seconds() * 1000)
 
                     # Calculate work duration (total - breaks)
                     breaks = session.get('breaks', [])
@@ -4555,7 +4726,15 @@ class WorkSessionMonitor(threading.Thread):
                         if br.get('start_ts') and br.get('end_ts'):
                             br_start = dt.datetime.fromisoformat(br['start_ts'])
                             br_end = dt.datetime.fromisoformat(br['end_ts'])
-                            break_ms += int((br_end - br_start).total_seconds() * 1000)
+                            if br_start.tzinfo is None:
+                                br_start = br_start.replace(tzinfo=dt.timezone.utc)
+                            if br_end.tzinfo is None:
+                                br_end = br_end.replace(tzinfo=dt.timezone.utc)
+                            # Clamp break within session window
+                            br_start = max(br_start, start_dt)
+                            br_end = min(br_end, now)
+                            if br_end > br_start:
+                                break_ms += int((br_end - br_start).total_seconds() * 1000)
 
                     work_ms = duration_ms - break_ms
 
@@ -4607,7 +4786,7 @@ class WorkSessionMonitor(threading.Thread):
                             # No activity detected - system might have been shut down/sleeping
                             if not self.inactive_break_start:
                                 # Start an automatic break for the inactivity period
-                                self.inactive_break_start = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=self.INACTIVITY_THRESHOLD_SEC)
+                                self.inactive_break_start = now - dt.timedelta(seconds=self.INACTIVITY_THRESHOLD_SEC)
                                 Alerts.log(f"Inactivity detected - starting automatic break")
                         elif activity_delta > 0:
                             # Activity resumed
@@ -4617,11 +4796,15 @@ class WorkSessionMonitor(threading.Thread):
                                 # Check if last break is still open or create new one
                                 if not breaks or breaks[-1].get('end_ts'):
                                     # Add a new break entry for the inactive period
-                                    breaks.append({
-                                        "start_ts": self.inactive_break_start.isoformat(),
-                                        "end_ts": dt.datetime.now(dt.timezone.utc).isoformat(),
-                                        "reason": "auto_inactivity"
-                                    })
+                                    # Clamp break start to session start to avoid negative work
+                                    br_start = max(self.inactive_break_start, start_dt)
+                                    br_end = now
+                                    if br_end > br_start:
+                                        breaks.append({
+                                            "start_ts": br_start.isoformat(),
+                                            "end_ts": br_end.isoformat(),
+                                            "reason": "auto_inactivity"
+                                        })
                                     Alerts.log(f"Automatic break added for inactivity period")
                                 self.inactive_break_start = None
 

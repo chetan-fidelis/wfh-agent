@@ -1,12 +1,12 @@
 {
-  "2025-10-21": {
-    "active_secs": 554,
-    "idle_secs": 0,
+  "2025-10-29": {
+    "active_secs": 2428,
+    "idle_secs": 78,
     "offline_secs": 0,
-    "work_secs": 554,
-    "active_ratio": 1.0,
-    "idle_ratio": 0.0,
-    "utilization_percent": 100.0,
+    "work_secs": 2506,
+    "active_ratio": 0.969,
+    "idle_ratio": 0.031,
+    "utilization_percent": 96.9,
     "underutilized": true,
     "overburdened": false,
     "burnout_risk": false,
