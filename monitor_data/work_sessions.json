@@ -157,5 +157,15 @@
     "break_ms": 0,
     "total_ms": 2179166,
     "synced": true
+  },
+  {
+    "emp_id": 18698,
+    "start_ts": "2025-11-04T10:53:27.261108+00:00",
+    "end_ts": "2025-11-04T10:53:33.058873+00:00",
+    "breaks": [],
+    "work_ms": 5797,
+    "break_ms": 0,
+    "total_ms": 5797,
+    "synced": true
   }
 ]

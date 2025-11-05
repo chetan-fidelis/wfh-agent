@@ -112,33 +112,69 @@ function formatDuration(ms) {
   return `${minutes}m`;
 }
 
-// Real-time timer update for tray menu
+// Real-time timer update for tray menu (kept as no-op to avoid duplicate intervals)
 let menuUpdateTimer = null;
 
 function startMenuUpdateTimer() {
-  if (menuUpdateTimer) return; // Already running
-
-  // Update menu every 30 seconds to show real-time duration
-  menuUpdateTimer = setInterval(() => {
-    if (tray && tray._rebuildMenu) {
-      tray._rebuildMenu();
-    }
-  }, 30000); // 30 seconds
-
-  console.log('[timer] Started real-time menu updates');
+  // No-op: createTray manages a single 60s interval. Avoid a second timer.
+  console.log('[timer] Real-time menu updates managed by tray interval');
 }
 
 function stopMenuUpdateTimer() {
   if (menuUpdateTimer) {
     clearInterval(menuUpdateTimer);
     menuUpdateTimer = null;
-    console.log('[timer] Stopped real-time menu updates');
+    console.log('[timer] Stopped auxiliary menu updates');
   }
 }
 
-// Get current work session status from backend
+// Configure auto-updater for silent background updates (packaged builds only)
+function setupAutoUpdater() {
+  try {
+    if (!autoUpdater || !app.isPackaged) return;
+    autoUpdater.logger = {
+      info: (m) => console.log('[updater]', m),
+      error: (m) => console.error('[updater]', m)
+    };
+    autoUpdater.autoDownload = true;
+    autoUpdater.autoInstallOnAppQuit = true; // install on next quit as a fallback
+    autoUpdater.allowPrerelease = false;
+
+    autoUpdater.on('checking-for-update', () => console.log('[updater] checking for updates...'));
+    autoUpdater.on('update-available', (info) => console.log('[updater] update available ->', info && info.version));
+    autoUpdater.on('update-not-available', () => console.log('[updater] update not available'));
+    autoUpdater.on('error', (err) => console.error('[updater] error', err && (err.stack || err.message || err)));
+    autoUpdater.on('download-progress', (p) => {
+      try { console.log(`[updater] download ${Math.round(p.percent || 0)}%`); } catch (_) {}
+    });
+    autoUpdater.on('update-downloaded', (info) => {
+      console.log('[updater] update downloaded ->', info && info.version);
+      // Silent install and restart app; avoids showing NSIS UI
+      try {
+        autoUpdater.quitAndInstall(true, true);
+      } catch (e) {
+        console.warn('[updater] quitAndInstall failed, will install on quit:', e.message);
+      }
+    });
+
+    // Initial check and periodic re-check
+    autoUpdater.checkForUpdatesAndNotify().catch(() => {});
+    setInterval(() => {
+      autoUpdater.checkForUpdates().catch(() => {});
+    }, 4 * 60 * 60 * 1000);
+  } catch (e) {
+    console.warn('setupAutoUpdater error:', e.message);
+  }
+}
+
+// Get current work session status from backend (cached for 15s)
+let _wsCache = { ts: 0, value: null };
 async function getWorkStatus() {
   try {
+    const nowTs = Date.now();
+    if (_wsCache.value && nowTs - _wsCache.ts < 15000) {
+      return _wsCache.value;
+    }
     // Fetch live session state from backend
     const cfg = loadConfig();
     const baseUrl = cfg.serverUrl || 'http://127.0.0.1:5050';
@@ -165,13 +201,15 @@ async function getWorkStatus() {
         const breaks = data.state.breaks || [];
         const onBreak = breaks.length > 0 && !breaks[breaks.length - 1].end_ts;
 
-        return {
+        const result = {
           status: onBreak ? 'break' : 'working',
           label: onBreak ? '☕ On Break' : '⏱️ Working',
           duration: workMs,
           totalDuration: totalMs,
           breakDuration: breakMs
         };
+        _wsCache = { ts: nowTs, value: result };
+        return result;
       }
     } catch (backendErr) {
       console.warn('[tray] Backend session fetch failed:', backendErr.message);
@@ -200,13 +238,15 @@ async function getWorkStatus() {
     const breaks = work.current.breaks || [];
     const onBreak = breaks.length > 0 && !breaks[breaks.length - 1].end_ts;
 
-    return {
+    const result = {
       status: onBreak ? 'break' : 'working',
       label: onBreak ? '☕ On Break' : '⏱️ Working',
       duration: workMs,
       totalDuration: totalMs,
       breakDuration: breakMs
     };
+    _wsCache = { ts: nowTs, value: result };
+    return result;
   } catch (e) {
     console.error('Error getting work status:', e);
     return { status: 'idle', label: 'Not Working', duration: 0 };
@@ -422,8 +462,10 @@ function createTray() {
       }
     }, 60000); // Update every minute
 
-    // Periodic work notifications
-    startWorkNotifications();
+    // Periodic work notifications (deferred to avoid startup contention)
+    setTimeout(() => {
+      try { startWorkNotifications(); } catch (e) { console.warn('startWorkNotifications defer error:', e.message); }
+    }, 5000);
 
     return tray;
   } catch (e) {
@@ -1264,6 +1306,9 @@ app.whenReady().then(async () => {
   nativeTheme.themeSource = 'light';
   // Ensure notifications work in dev on Windows
   try { app.setAppUserModelId('WFH Agent'); } catch (_) { }
+
+  // Silent background updates (packaged only)
+  try { setupAutoUpdater(); } catch (_) {}
 
   // Initialize netLog for network debugging
   try {

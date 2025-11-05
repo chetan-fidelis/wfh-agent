@@ -1,6 +1,6 @@
 {
   "name": "wfh-agent-desktop",
-  "version": "0.1.17",
+  "version": "0.1.19",
   "description": "WFH Agent Desktop (Electron)",
   "main": "main.js",
   "author": "Fidelis Technology Services Pvt. Ltd.",

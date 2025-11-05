@@ -2102,7 +2102,7 @@ class InputActivity:
 
     def start(self):
         # Try Windows native hooks first (Python 3.13+ compatible)
-        if sys.platform == 'win32' and sys.version_info >= (3, 13):
+        if sys.platform == 'win32' and sys.version_info >= (3, 13) and os.environ.get('WFH_USE_WIN_HOOKS', '0') == '1':
             try:
                 self.use_windows_hooks = True
                 self.stop_event.clear()
@@ -2114,7 +2114,10 @@ class InputActivity:
                 Alerts.log(f"Failed to start Windows hooks: {e}")
                 self.use_windows_hooks = False
 
-        # Fallback to pynput for Python < 3.13
+        # Fallback to pynput for Python < 3.13. On Windows Python 3.13+, pynput is unstable; skip unless explicitly enabled.
+        if sys.platform == 'win32' and sys.version_info >= (3, 13) and os.environ.get('WFH_USE_PYNPUT', '0') != '1':
+            Alerts.log("Skipping pynput listeners on Windows Python 3.13+ (set WFH_USE_PYNPUT=1 to force enable)")
+            return
         try:
             self.k_listener = keyboard.Listener(on_press=self._on_key)
             self.m_listener = mouse.Listener(on_click=self._on_click)
@@ -2158,6 +2161,13 @@ class ForegroundTracker(threading.Thread):
         
         # URL sanitization settings
         self.sanitize_urls = cfg.data.get('data_validation', {}).get('sanitize_urls', True)
+        # URL extraction feature flag and throttling (lightweight defaults)
+        self.enable_url_extract = bool(cfg.data.get('features', {}).get('website_url_extraction', False))
+        self._last_url_extract_ts = 0.0
+        try:
+            self._url_extract_interval = int(cfg.data.get('features', {}).get('url_extract_interval_sec', 10))
+        except Exception:
+            self._url_extract_interval = 10
     
     def _sanitize_url(self, url: str) -> str:
         """Remove sensitive data from URLs"""
@@ -2363,11 +2373,21 @@ class ForegroundTracker(threading.Thread):
             Alerts.log(f"Timeline DB insert error: {e}")
 
     def _extract_url_from_hwnd(self, exe: str, hwnd: Optional[int], title: str = "") -> str:
+        if not getattr(self, 'enable_url_extract', False):
+            return ""
         if not auto or not hwnd:
             return ""
         # Only attempt for known browsers
         if exe not in ("chrome.exe", "msedge.exe", "firefox.exe"):
             return ""
+        # Throttle extraction frequency
+        try:
+            now_ts = time.time()
+            if (now_ts - (self._last_url_extract_ts or 0)) < getattr(self, '_url_extract_interval', 10):
+                return ""
+            self._last_url_extract_ts = now_ts
+        except Exception:
+            pass
         try:
             root = auto.ControlFromHandle(hwnd)
             edit = None
@@ -2603,7 +2623,9 @@ class ForegroundTracker(threading.Thread):
         while not self.stop_event.is_set():
             title, exe, hwnd = self._get_foreground()
             status = self._status()
-            url = self._extract_url_from_hwnd(exe, hwnd, title)
+            url = ""
+            if status == "active":
+                url = self._extract_url_from_hwnd(exe, hwnd, title)
             if not url and exe in ("chrome.exe", "msedge.exe", "firefox.exe") and title:
                 # Fallback: infer from title without needing browser flags
                 url = self._infer_url_from_title(title)
@@ -3117,6 +3139,8 @@ class MonitorApp:
         self.flask_app: Optional[Flask] = None
         self.server_thread: Optional[threading.Thread] = None
         self._geo_cache: Dict[str, any] = {"ts": 0, "data": {}}
+        # Defer geolocation network calls briefly after startup to avoid contention
+        self._geo_ready_at: float = time.time() + 20.0
         self._notifier = NotificationManager(self)
         self.itsm = ITSMHelper(self)
         self.session_monitor: Optional['WorkSessionMonitor'] = None
@@ -3228,8 +3252,16 @@ class MonitorApp:
         if self.cfg.data.get('features', {}).get('itsm', True) and self.cfg.data.get('itsm', {}).get('enabled', True):
             self.itsm.start()
         if self.cfg.data.get('features', {}).get('scheduled_shots', True):
-            self.shooter = ScheduledShooter(self)
-            self.shooter.start()
+            # Guard against duplicate starts
+            try:
+                if not self.shooter or not getattr(self.shooter, 'is_alive', lambda: False)():
+                    self.shooter = ScheduledShooter(self)
+                    self.shooter.start()
+                    Alerts.log("ScheduledShooter started")
+                else:
+                    Alerts.log("ScheduledShooter already running; skip starting a second instance")
+            except Exception as e:
+                Alerts.log(f"ScheduledShooter start guard error: {e}")
         # Start work session monitor for auto-stop limits
         try:
             self.session_monitor = WorkSessionMonitor(self)
@@ -4236,6 +4268,13 @@ class MonitorApp:
     def get_geo_info(self) -> Dict:
         # Cache geo lookup: 1 hour on success; 10 minutes on failure to avoid spam
         now = time.time()
+        # Defer network lookups during first seconds after startup to avoid contention
+        try:
+            if hasattr(self, '_geo_ready_at') and now < float(self._geo_ready_at):
+                cached = self._geo_cache.get('data') or {}
+                return cached
+        except Exception:
+            pass
         cache_ts = self._geo_cache.get('ts', 0)
         cached = self._geo_cache.get('data')
 
@@ -4769,34 +4808,25 @@ class WorkSessionMonitor(threading.Thread):
 
                 # Check 3: Inactivity detection (shutdown/sleep) - auto-create break
                 if session and session.get('start_ts') and not session.get('end_ts'):
-                    current_time = time.time()
-                    # Check if system has been inactive
-                    if hasattr(self.app, 'activity'):
-                        total_activity = self.app.activity.mouse_clicks + self.app.activity.key_presses
-                        # Initialize if first check
-                        if not hasattr(self, 'last_total_activity'):
-                            self.last_total_activity = total_activity
-                            self.last_activity_check = current_time
+                    # Prefer reliable system idle time over hook counters to avoid false breaks when hooks are disabled
+                    idle_sec = None
+                    try:
+                        idle_sec = get_system_idle_seconds()
+                    except Exception:
+                        idle_sec = None
 
-                        # Check if no activity in the threshold period
-                        time_since_check = current_time - self.last_activity_check
-                        activity_delta = total_activity - self.last_total_activity
-
-                        if activity_delta == 0 and time_since_check >= self.INACTIVITY_THRESHOLD_SEC:
-                            # No activity detected - system might have been shut down/sleeping
+                    if idle_sec is not None:
+                        if idle_sec >= self.INACTIVITY_THRESHOLD_SEC:
+                            # Sustained OS-level idle detected
                             if not self.inactive_break_start:
-                                # Start an automatic break for the inactivity period
                                 self.inactive_break_start = now - dt.timedelta(seconds=self.INACTIVITY_THRESHOLD_SEC)
-                                Alerts.log(f"Inactivity detected - starting automatic break")
-                        elif activity_delta > 0:
-                            # Activity resumed
+                                Alerts.log("Inactivity detected (OS idle) - starting automatic break")
+                        else:
+                            # Activity present
                             if self.inactive_break_start:
                                 # End the automatic break
                                 breaks = session.setdefault('breaks', [])
-                                # Check if last break is still open or create new one
                                 if not breaks or breaks[-1].get('end_ts'):
-                                    # Add a new break entry for the inactive period
-                                    # Clamp break start to session start to avoid negative work
                                     br_start = max(self.inactive_break_start, start_dt)
                                     br_end = now
                                     if br_end > br_start:
@@ -4805,12 +4835,42 @@ class WorkSessionMonitor(threading.Thread):
                                             "end_ts": br_end.isoformat(),
                                             "reason": "auto_inactivity"
                                         })
-                                    Alerts.log(f"Automatic break added for inactivity period")
+                                    Alerts.log("Automatic break added for inactivity period (OS idle)")
                                 self.inactive_break_start = None
+                    else:
+                        # Fallback to lightweight counters when OS idle not available
+                        current_time = time.time()
+                        if hasattr(self.app, 'activity'):
+                            total_activity = self.app.activity.mouse_clicks + self.app.activity.key_presses
+                            if not hasattr(self, 'last_total_activity'):
+                                self.last_total_activity = total_activity
+                                self.last_activity_check = current_time
 
-                            # Update tracking variables
-                            self.last_total_activity = total_activity
-                            self.last_activity_check = current_time
+                            time_since_check = current_time - self.last_activity_check
+                            activity_delta = total_activity - self.last_total_activity
+
+                            if activity_delta == 0 and time_since_check >= self.INACTIVITY_THRESHOLD_SEC:
+                                if not self.inactive_break_start:
+                                    self.inactive_break_start = now - dt.timedelta(seconds=self.INACTIVITY_THRESHOLD_SEC)
+                                    Alerts.log("Inactivity detected (counters) - starting automatic break")
+                            elif activity_delta > 0:
+                                if self.inactive_break_start:
+                                    breaks = session.setdefault('breaks', [])
+                                    if not breaks or breaks[-1].get('end_ts'):
+                                        br_start = max(self.inactive_break_start, start_dt)
+                                        br_end = now
+                                        if br_end > br_start:
+                                            breaks.append({
+                                                "start_ts": br_start.isoformat(),
+                                                "end_ts": br_end.isoformat(),
+                                                "reason": "auto_inactivity"
+                                            })
+                                        Alerts.log("Automatic break added for inactivity period (counters)")
+                                    self.inactive_break_start = None
+
+                                # Update tracking variables
+                                self.last_total_activity = total_activity
+                                self.last_activity_check = current_time
 
             except Exception as e:
                 Alerts.log(f"WorkSessionMonitor error: {e}")
