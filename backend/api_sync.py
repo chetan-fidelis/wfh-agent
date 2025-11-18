@@ -1012,3 +1012,177 @@ class APISync:
         results['screenshots'] = self.sync_screenshots(emp_id)
 
         return results
+
+    def sync_all_consolidated(self, emp_id: int, sessions_file: str = None, usage_file: str = None,
+                            productivity_file: str = None, wellness_file: str = None,
+                            tickets_file: str = None, timeline_file: str = None) -> Dict[str, int]:
+        """Sync all data types in a single consolidated batch API call to reduce server load.
+        
+        Instead of making 5+ separate API calls, this consolidates all data into one batch request.
+        """
+        results = {}
+        
+        try:
+            # Collect all data types into a single payload
+            batch_payload = {'emp_id': emp_id, 'data': {}}
+            
+            # Collect heartbeat data
+            heartbeat_count = 0
+            try:
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT emp_id, ts, status, cpu_percent, memory_percent,
+                           process_name, window_title, domain, url, battery_level,
+                           battery_plugged, geo
+                    FROM heartbeat
+                    WHERE emp_id = ? AND synced = 0
+                    ORDER BY ts DESC
+                    LIMIT ?
+                """, (emp_id, self.batch_size))
+                
+                records = cursor.fetchall()
+                if records:
+                    heartbeat_records = []
+                    record_ids = []
+                    for row in records:
+                        (emp_id_rec, ts, status, cpu_percent, memory_percent,
+                         process_name, window_title, domain, url, battery_level,
+                         battery_plugged, geo_json) = row
+                        
+                        record_data = {
+                            'ts': ts,
+                            'cpu_percent': cpu_percent or 0.0,
+                            'mem_percent': memory_percent or 0.0,
+                            'fg_app': process_name or '',
+                            'fg_title': window_title or '',
+                            'idle_sec': 0 if status == 'active' else 60,
+                            'active': status == 'active',
+                            'battery_percent': battery_level,
+                            'battery_plugged': bool(battery_plugged) if battery_plugged is not None else None,
+                            'geo': geo_json if geo_json else None
+                        }
+                        heartbeat_records.append(record_data)
+                        record_ids.append(row[0])
+                    
+                    if heartbeat_records:
+                        batch_payload['data']['heartbeat'] = heartbeat_records
+                        heartbeat_count = len(heartbeat_records)
+                        # Mark as synced
+                        placeholders = ','.join('?' * len(record_ids))
+                        cursor.execute(f"UPDATE heartbeat SET synced = 1 WHERE rowid IN ({placeholders})", record_ids)
+                        conn.commit()
+                
+                conn.close()
+            except Exception as e:
+                self.log(f"Error collecting heartbeat data: {e}")
+            
+            # Collect website usage data
+            website_usage_count = 0
+            if usage_file and os.path.exists(usage_file):
+                try:
+                    with open(usage_file, 'r', encoding='utf-8') as f:
+                        usage_data = json.load(f)
+                    if usage_data and isinstance(usage_data, dict):
+                        usage_records = []
+                        today = datetime.now().strftime('%Y-%m-%d')
+                        for domain, duration_sec in usage_data.items():
+                            if duration_sec > 0:
+                                usage_records.append({
+                                    'date': today,
+                                    'domain': domain,
+                                    'duration_sec': int(duration_sec),
+                                    'tag': 'neutral'
+                                })
+                        if usage_records:
+                            batch_payload['data']['website_usage'] = usage_records
+                            website_usage_count = len(usage_records)
+                except Exception as e:
+                    self.log(f"Error collecting website usage: {e}")
+            
+            # Collect productivity data
+            productivity_count = 0
+            if productivity_file and os.path.exists(productivity_file):
+                try:
+                    with open(productivity_file, 'r', encoding='utf-8') as f:
+                        productivity_data = json.load(f)
+                    if productivity_data and isinstance(productivity_data, dict):
+                        prod_records = []
+                        today = datetime.now().strftime('%Y-%m-%d')
+                        for app, tags in productivity_data.items():
+                            for tag, duration_sec in tags.items():
+                                if duration_sec > 0:
+                                    prod_records.append({
+                                        'date': today,
+                                        'tag': tag,
+                                        'duration_seconds': int(duration_sec)
+                                    })
+                        if prod_records:
+                            batch_payload['data']['productivity'] = prod_records
+                            productivity_count = len(prod_records)
+                except Exception as e:
+                    self.log(f"Error collecting productivity data: {e}")
+            
+            # Collect wellness data
+            wellness_count = 0
+            if wellness_file and os.path.exists(wellness_file):
+                try:
+                    with open(wellness_file, 'r', encoding='utf-8') as f:
+                        wellness_data = json.load(f)
+                    if wellness_data and isinstance(wellness_data, dict):
+                        wellness_records = []
+                        for date, data in wellness_data.items():
+                            wellness_records.append({
+                                'date': date,
+                                'active_secs': data.get('active', 0),
+                                'idle_secs': data.get('idle', 0),
+                                'offline_secs': data.get('offline', 0),
+                                'utilization_percent': data.get('utilization', 0)
+                            })
+                        if wellness_records:
+                            batch_payload['data']['wellness'] = wellness_records
+                            wellness_count = len(wellness_records)
+                except Exception as e:
+                    self.log(f"Error collecting wellness data: {e}")
+            
+            # Collect timeline data
+            timeline_count = 0
+            if timeline_file and os.path.exists(timeline_file):
+                try:
+                    with open(timeline_file, 'r', encoding='utf-8') as f:
+                        timeline_data = json.load(f)
+                    if timeline_data and isinstance(timeline_data, dict):
+                        timeline_records = []
+                        for date, hours in timeline_data.items():
+                            for hour, data in hours.items():
+                                timeline_records.append({
+                                    'date': date,
+                                    'hour': int(hour),
+                                    'active': data.get('active', 0),
+                                    'idle': data.get('idle', 0),
+                                    'offline': data.get('offline', 0)
+                                })
+                        if timeline_records:
+                            batch_payload['data']['timeline'] = timeline_records
+                            timeline_count = len(timeline_records)
+                except Exception as e:
+                    self.log(f"Error collecting timeline data: {e}")
+            
+            # Send consolidated batch in single API call
+            if batch_payload['data']:
+                if self._make_request('/api/ingest/batch', batch_payload):
+                    results['heartbeat'] = heartbeat_count
+                    results['website_usage'] = website_usage_count
+                    results['productivity'] = productivity_count
+                    results['wellness'] = wellness_count
+                    results['timeline'] = timeline_count
+                    self.log(f"Consolidated batch sync: {sum(results.values())} total records in 1 API call")
+                else:
+                    self.log("Consolidated batch sync failed")
+            else:
+                self.log("No data to sync")
+        
+        except Exception as e:
+            self.log(f"Error in consolidated sync: {e}")
+        
+        return results

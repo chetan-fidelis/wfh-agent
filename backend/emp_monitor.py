@@ -58,6 +58,18 @@ except Exception as e:
     API_SYNC_AVAILABLE = False
     print(f"[DEBUG] API sync import error: {e}")
 
+# Import download monitor for Naukri file tracking (v2 - simplified, bulletproof)
+try:
+    from download_monitor_v2 import DownloadMonitorV2 as DownloadMonitor
+    DOWNLOAD_MONITOR_AVAILABLE = True
+except ImportError as e:
+    print(f"[emp_monitor] Download monitor import failed: {e}")
+    DOWNLOAD_MONITOR_AVAILABLE = False
+    print(f"[DEBUG] Download monitor import failed: {e}")
+except Exception as e:
+    DOWNLOAD_MONITOR_AVAILABLE = False
+    print(f"[DEBUG] Download monitor import error: {e}")
+
 # Third-party deps
 from flask import Flask, send_file, jsonify, Response, request
 from werkzeug.utils import secure_filename
@@ -301,14 +313,40 @@ DEFAULT_CONFIG = {
         "retention_days": 30
     }
     ,
+    "download_monitor": {
+        "enabled": False,                # Enable for recruitment-related employees
+        "api_url": "http://ats-tool.test/api",
+        "target_designations": [
+            "recruiter", "hr", "hiring_manager",
+            "manager - talent acquisition",
+            "associate manager - talent acquisition",
+            "senior executive - talent acquisition",
+            "team lead - talent acquisition",
+            "executive - talent acquisition",
+            "associate manager – talent acquisition",
+            "vice president - talent acquisition",
+            "executive - talent acquisition",
+            "trainee - talent acquisition",
+            "senior executive - talent acquisition - rpo",
+            "talent acquisition partner",
+            "talent acquisition",
+            "associate vice president - talent acquisition"
+        ],
+        "check_interval_sec": 30,        # Check downloads every 30 seconds
+        "max_file_size_mb": 100,         # Max file size to upload
+        "allowed_extensions": ["pdf", "docx", "txt"],  # Naukri-specific
+        "naukri_pattern": "Naukri_",     # Filename pattern to match
+        "monitor_naukri_only": True      # Only monitor Naukri_*.pdf files
+    }
+    ,
     "ingestion": {
         "enabled": True,
         "mode": "api",                   # api | postgres | file
         "file_retention_days": 30,       # how long to keep daily heartbeat files
         "batch_size": 200,               # max items per flush
         "flush_interval_sec": 30,        # flush cadence
-        "heartbeat_sync_sec": 1800,      # how often to sync heartbeat (30 minutes)
-        "full_sync_sec": 3600,           # how often to sync all data (60 minutes)
+        "heartbeat_sync_sec": 3600,      # how often to sync heartbeat (60 minutes)
+        "full_sync_sec": 7200,           # how often to sync all data (120 minutes)
         "sampling": {
             "state_change": True,        # emit on status/process/url change
             "periodic_sec": 60,          # periodic snapshot interval
@@ -366,8 +404,8 @@ class LocalStorage:
             self.full_sync_interval = int(ing.get('full_sync_sec', 3600))   # default 60 min
         else:
             # Safe defaults if config not available
-            self.sync_interval = 1800  # 30 minutes
-            self.full_sync_interval = 3600  # 60 minutes
+            self.sync_interval = 3600  # 60 minutes
+            self.full_sync_interval = 7200  # 120 minutes
         # Ensure a lock exists for sync
         self.sync_lock = threading.Lock()
         conn = sqlite3.connect(self.db_path)
@@ -541,6 +579,11 @@ class LocalStorage:
         cursor = conn.cursor()
         
         now = dt.datetime.now().isoformat()
+        # Normalize status to satisfy NOT NULL constraint
+        try:
+            status_norm = (status or '').strip() or 'unknown'
+        except Exception:
+            status_norm = 'unknown'
         
         try:
             cursor.execute('''
@@ -562,10 +605,10 @@ class LocalStorage:
                     geo = ?,
                     synced = 0
             ''', (
-                emp_id, ts, status, cpu_percent, memory_percent, process_name, window_title,
+                emp_id, ts, status_norm, cpu_percent, memory_percent, process_name, window_title,
                 domain, url, battery_level, battery_plugged, json.dumps(geo) if geo else None, 
                 # For ON CONFLICT UPDATE
-                status, cpu_percent, memory_percent, process_name, window_title,
+                status_norm, cpu_percent, memory_percent, process_name, window_title,
                 domain, url, battery_level, battery_plugged, json.dumps(geo) if geo else None
             ))
             
@@ -842,7 +885,7 @@ class LocalStorage:
         return self._sync_direct_postgres(tables_to_sync)
 
     def _sync_via_api(self):
-        """Sync data via API server"""
+        """Sync data via API server using individual endpoint calls"""
         if not self.sync_lock.acquire(blocking=False):
             self.log("Sync already in progress, skipping")
             return
@@ -862,7 +905,7 @@ class LocalStorage:
             tickets_file = os.path.join(data_dir, 'itsm_tickets.json')
             timeline_file = os.path.join(data_dir, 'timeline.json')
 
-            # Sync all data
+            # Sync all data using individual endpoints (API expects separate calls)
             results = self.api_sync.sync_all(
                 emp_id,
                 sessions_file=sessions_file,
@@ -2775,6 +2818,38 @@ def collect_devices_info():
     return info
 
 
+def is_recruitment_designation(designation: Optional[str]) -> bool:
+    """Check if designation is recruitment-related (for Naukri file monitoring)."""
+    if not designation:
+        return False
+    
+    # Normalize: lowercase, replace em-dash with hyphen, collapse whitespace
+    d = str(designation).lower().replace('\u2013', '-').replace('\u2014', '-')
+    # Collapse repeated whitespace
+    try:
+        d = re.sub(r'\s+', ' ', d).strip()
+    except Exception:
+        d = ' '.join(d.split()).strip()
+    
+    recruitment_keywords = [
+        'recruiter',
+        'hr',
+        'hiring_manager',
+        'hiring manager',
+        'manager - talent acquisition',
+        'associate manager - talent acquisition',
+        'senior executive - talent acquisition',
+        'team lead - talent acquisition',
+        'executive - talent acquisition',
+        'vice president - talent acquisition',
+        'trainee - talent acquisition',
+        'talent acquisition partner',
+        'talent acquisition',
+    ]
+    
+    return any(keyword in d for keyword in recruitment_keywords)
+
+
 def send_admin_notification(event_type: str, data: Dict, cfg: Optional['Config'] = None):
     """Send admin notification via webhook or email"""
     try:
@@ -3155,6 +3230,10 @@ class MonitorApp:
         self._session_watch_stop = threading.Event()
         self._session_watch_thread = None
         
+        # Initialize download monitor for Naukri file tracking
+        self.download_monitor: Optional[DownloadMonitor] = None
+        self._download_monitor_auth_token: Optional[str] = None
+        
     def _load_emp_id_from_session(self):
         """Load employee ID from Electron session file if available"""
         try:
@@ -3283,6 +3362,35 @@ class MonitorApp:
             threading.Thread(target=self.local_storage.sync_to_postgres, daemon=True).start()
         except Exception as e:
             Alerts.log(f"Failed to trigger initial sync: {e}")
+        
+        # Start download monitor for recruitment employees (Naukri file tracking)
+        try:
+            dm_cfg = self.cfg.data.get('download_monitor', {})
+            if dm_cfg.get('enabled', False) and DOWNLOAD_MONITOR_AVAILABLE:
+                emp_id = int(self.cfg.data.get('emp_id', 0))
+                designation = self.cfg.data.get('designation', '')
+                
+                # Start if explicitly enabled via config regardless of designation
+                if dm_cfg.get('enabled', False):
+                    Alerts.log(f"[DownloadMonitor] Starting (enabled via config): emp_id={emp_id}, designation={designation or ''}")
+                    self.download_monitor = DownloadMonitor(self.cfg.data, emp_id)
+                    self.download_monitor.start()
+                    Alerts.log(f"[DownloadMonitor] Monitor started (config enabled)")
+                # Otherwise, start based on recruitment designation heuristic
+                elif is_recruitment_designation(designation):
+                    Alerts.log(f"[DownloadMonitor] Starting: emp_id={emp_id}, designation={designation}")
+                    self.download_monitor = DownloadMonitor(self.cfg.data, emp_id)
+                    self.download_monitor.start()
+                    Alerts.log(f"[DownloadMonitor] Monitor started for recruitment employee")
+                else:
+                    Alerts.log(f"[DownloadMonitor] Skipped: designation '{designation}' is not recruitment-related")
+            else:
+                if not dm_cfg.get('enabled', False):
+                    Alerts.log("[DownloadMonitor] Disabled in config")
+                if not DOWNLOAD_MONITOR_AVAILABLE:
+                    Alerts.log("[DownloadMonitor] Module not available")
+        except Exception as e:
+            Alerts.log(f"[DownloadMonitor] Start error: {e}")
 
         if enable_http:
             self._start_http(host, port)
@@ -3308,6 +3416,11 @@ class MonitorApp:
         try:
             if self.shooter:
                 self.shooter.stop()
+        except Exception:
+            pass
+        try:
+            if self.download_monitor:
+                self.download_monitor.stop()
         except Exception:
             pass
 
@@ -3577,7 +3690,8 @@ class MonitorApp:
                 return 0
 
         def _sum_break_ms(breaks: List[Dict], session_start_ts: str, session_end_ts: str) -> int:
-            """Sum break durations, clamped within the session window to avoid over-counting."""
+            """Sum break durations, clamped within the session window to avoid over-counting.
+            Handles both closed breaks (with end_ts) and open breaks (without end_ts, using session_end_ts)."""
             try:
                 ss = dt.datetime.fromisoformat(session_start_ts)
                 se = dt.datetime.fromisoformat(session_end_ts)
@@ -3587,11 +3701,16 @@ class MonitorApp:
             total = 0
             for br in breaks or []:
                 st, en = br.get('start_ts'), br.get('end_ts')
-                if not (st and en):
+                # Skip breaks without start_ts
+                if not st:
                     continue
                 try:
                     bst = dt.datetime.fromisoformat(st)
-                    ben = dt.datetime.fromisoformat(en)
+                    # Use end_ts if available, otherwise use session_end_ts (for open breaks)
+                    ben = dt.datetime.fromisoformat(en) if en else se
+                    # If no session end time available, skip this break
+                    if not ben:
+                        continue
                     # Clamp to session window if available
                     if ss and se:
                         if bst < ss:
@@ -3696,7 +3815,12 @@ class MonitorApp:
                     # Check if session is stale (older than 24 hours)
                     try:
                         start_ts = dt.datetime.fromisoformat(self._work_session.get('start_ts'))
-                        age_hours = (dt.datetime.now() - start_ts).total_seconds() / 3600
+                        now_utc = dt.datetime.now(dt.timezone.utc)
+                        if start_ts.tzinfo is None:
+                            start_ts_utc = start_ts.replace(tzinfo=dt.timezone.utc)
+                        else:
+                            start_ts_utc = start_ts.astimezone(dt.timezone.utc)
+                        age_hours = (now_utc - start_ts_utc).total_seconds() / 3600
 
                         if age_hours > 24:
                             # Stale session - clear it
@@ -3709,8 +3833,69 @@ class MonitorApp:
                         Alerts.log(f"Error checking session age: {e}, creating new session")
                         self._work_session = {}
 
-                # Create new session
-                self._work_session = {"start_ts": _now_iso(), "end_ts": None, "breaks": [], "status": "active"}
+                # Optional payload to restore an existing timeline
+                payload = {}
+                try:
+                    payload = request.get_json(force=False, silent=True) or {}
+                except Exception:
+                    payload = {}
+
+                # Validate and normalize fields
+                start_ts = payload.get('start_ts')
+                status = (payload.get('status') or 'active')
+                breaks = payload.get('breaks') or []
+
+                # Default to now if invalid or missing
+                def _is_iso(ts: str) -> bool:
+                    try:
+                        dt.datetime.fromisoformat(ts)
+                        return True
+                    except Exception:
+                        return False
+
+                if not (isinstance(start_ts, str) and _is_iso(start_ts)):
+                    start_ts = _now_iso()
+
+                # Clamp start to last 24h to avoid bogus timelines
+                try:
+                    st_dt = dt.datetime.fromisoformat(start_ts)
+                    now_dt = dt.datetime.now(dt.timezone.utc) if st_dt.tzinfo else dt.datetime.now()
+                    if (now_dt - st_dt).total_seconds() > 24 * 3600:
+                        Alerts.log("/session/start: start_ts older than 24h, clamping to now-24h")
+                        start_ts = (now_dt - dt.timedelta(hours=24)).isoformat()
+                except Exception:
+                    pass
+
+                # Sanitize breaks: keep only well-formed items; ensure times within session..now
+                sane_breaks = []
+                try:
+                    st_dt = dt.datetime.fromisoformat(start_ts)
+                    now_dt = dt.datetime.now(dt.timezone.utc) if st_dt.tzinfo else dt.datetime.now()
+                    for b in breaks:
+                        if not isinstance(b, dict):
+                            continue
+                        bst, ben = b.get('start_ts'), b.get('end_ts')
+                        if not (isinstance(bst, str) and _is_iso(bst)):
+                            continue
+                        try:
+                            bst_dt = dt.datetime.fromisoformat(bst)
+                            if bst_dt < st_dt:
+                                bst_dt = st_dt
+                            if ben and isinstance(ben, str) and _is_iso(ben):
+                                ben_dt = dt.datetime.fromisoformat(ben)
+                                if ben_dt > now_dt:
+                                    ben_dt = now_dt
+                                if ben_dt > bst_dt:
+                                    sane_breaks.append({"start_ts": bst_dt.isoformat(), "end_ts": ben_dt.isoformat()})
+                            else:
+                                # open break
+                                sane_breaks.append({"start_ts": bst_dt.isoformat(), "end_ts": None})
+                        except Exception:
+                            continue
+                except Exception:
+                    sane_breaks = []
+
+                self._work_session = {"start_ts": start_ts, "end_ts": None, "breaks": sane_breaks, "status": status or 'active'}
                 return jsonify({"ok": True, "state": self._work_session})
             except Exception as e:
                 return jsonify({"ok": False, "error": str(e)}), 500
@@ -4300,44 +4485,28 @@ class MonitorApp:
             if mode == 'ip_multi':
                 data = self._geo_from_multiple_providers()
             else:
-                # Default: Try ipapi.co first, fallback to ipwho.is on rate limit
-                Alerts.log(f"Fetching geolocation from ipapi.co...")
-                r = requests.get('https://ipapi.co/json/', timeout=5)
-                if r.ok:
-                    j = r.json()
-                    data = {
-                        "ip": j.get('ip'),
-                        "city": j.get('city'),
-                        "region": j.get('region'),
-                        "country": j.get('country_name') or j.get('country'),
-                        "latitude": j.get('latitude'),
-                        "longitude": j.get('longitude'),
-                        "org": j.get('org') or j.get('asn'),
-                    }
-                    Alerts.log(f"Geolocation fetched: {data.get('city')}, {data.get('country')} (IP: {data.get('ip')})")
-                elif r.status_code == 429:
-                    # Rate limited - try fallback provider
-                    Alerts.log(f"ipapi.co rate limited (429), trying fallback provider ipwho.is...")
-                    try:
-                        r2 = requests.get('https://ipwho.is/', timeout=5)
-                        if r2.ok:
-                            j = r2.json()
-                            if j.get('success', True):
-                                conn = j.get('connection') or {}
-                                data = {
-                                    "ip": j.get('ip'),
-                                    "city": j.get('city'),
-                                    "region": j.get('region'),
-                                    "country": j.get('country') or j.get('country_name'),
-                                    "latitude": j.get('latitude'),
-                                    "longitude": j.get('longitude'),
-                                    "org": conn.get('org') or conn.get('isp'),
-                                }
-                                Alerts.log(f"Fallback geolocation fetched: {data.get('city')}, {data.get('country')} (IP: {data.get('ip')})")
-                    except Exception as e2:
-                        Alerts.log(f"Fallback geo provider failed: {e2}")
-                else:
-                    Alerts.log(f"Geo API returned status: {r.status_code}")
+                # Default: Use ipwho.is only (ipapi.co is rate-limited and unreliable)
+                Alerts.log(f"Fetching geolocation from ipwho.is...")
+                try:
+                    r = requests.get('https://ipwho.is/', timeout=5)
+                    if r.ok:
+                        j = r.json()
+                        if j.get('success', True):
+                            conn = j.get('connection') or {}
+                            data = {
+                                "ip": j.get('ip'),
+                                "city": j.get('city'),
+                                "region": j.get('region'),
+                                "country": j.get('country') or j.get('country_name'),
+                                "latitude": j.get('latitude'),
+                                "longitude": j.get('longitude'),
+                                "org": conn.get('org') or conn.get('isp'),
+                            }
+                            Alerts.log(f"Geolocation fetched: {data.get('city')}, {data.get('country')} (IP: {data.get('ip')})")
+                    else:
+                        Alerts.log(f"Geo API returned status: {r.status_code}")
+                except Exception as e:
+                    Alerts.log(f"Geo lookup failed: {e}")
         except Exception as e:
             Alerts.log(f"Geo lookup failed: {e}")
         # Always cache outcome (even if empty) to honor TTL/backoff above
@@ -4345,35 +4514,16 @@ class MonitorApp:
         return data
 
     def _geo_from_multiple_providers(self) -> Dict:
-        """Query multiple IP geolocation providers and choose a consensus city.
-        Providers: ipapi.co, ipwho.is. Returns first non-empty on failure.
+        """Query IP geolocation provider (ipwho.is only).
+        Note: ipapi.co removed due to rate limiting issues.
         """
-        results: List[Dict] = []
-        # Provider 1: ipapi.co
         try:
-            r1 = requests.get('https://ipapi.co/json/', timeout=3)
-            if r1.ok:
-                j = r1.json()
-                results.append({
-                    "ip": j.get('ip'),
-                    "city": j.get('city'),
-                    "region": j.get('region'),
-                    "country": j.get('country_name') or j.get('country'),
-                    "latitude": j.get('latitude'),
-                    "longitude": j.get('longitude'),
-                    "org": j.get('org') or j.get('asn'),
-                    "src": "ipapi.co"
-                })
-        except Exception as e:
-            Alerts.log(f"Geo ipapi.co failed: {e}")
-        # Provider 2: ipwho.is
-        try:
-            r2 = requests.get('https://ipwho.is/', timeout=3)
-            if r2.ok:
-                j = r2.json()
+            r = requests.get('https://ipwho.is/', timeout=3)
+            if r.ok:
+                j = r.json()
                 if j.get('success', True):
                     conn = j.get('connection') or {}
-                    results.append({
+                    return {
                         "ip": j.get('ip'),
                         "city": j.get('city'),
                         "region": j.get('region'),
@@ -4381,27 +4531,9 @@ class MonitorApp:
                         "latitude": j.get('latitude'),
                         "longitude": j.get('longitude'),
                         "org": conn.get('org') or conn.get('isp'),
-                        "src": "ipwho.is"
-                    })
+                    }
         except Exception as e:
-            Alerts.log(f"Geo ipwho.is failed: {e}")
-
-        # Choose consensus by city (case-insensitive)
-        if results:
-            from collections import Counter
-            cities = [ (r.get('city') or '').strip().lower() for r in results if r.get('city') ]
-            if cities:
-                counts = Counter(cities)
-                top_city, _ = counts.most_common(1)[0]
-                # pick first result matching the top city
-                for r in results:
-                    if (r.get('city') or '').strip().lower() == top_city:
-                        r.pop('src', None)
-                        return r
-            # fallback to first
-            first = results[0]
-            first.pop('src', None)
-            return first
+            Alerts.log(f"Geo lookup failed: {e}")
         return {}
 
     @staticmethod

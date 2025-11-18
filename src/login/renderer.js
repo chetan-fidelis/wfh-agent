@@ -15,7 +15,7 @@
       header.className = 'header';
       header.innerHTML = `
         <div class="header-left">
-          <h1 class="title">WFH - Harmony</h1>
+          <h1 class="title">Harmony</h1>
         </div>
         <div class="header-right">
           <div class="win-controls">

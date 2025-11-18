@@ -2,31 +2,36 @@
   "windsurf.exe": {
     "productive": 0.0,
     "unproductive": 0.0,
-    "neutral": 22.09399962425232
+    "neutral": 326.57448863983154
   },
   "electron.exe": {
     "productive": 0.0,
     "unproductive": 0.0,
-    "neutral": 72.05418968200684
+    "neutral": 12.006648302078247
   },
   "explorer.exe": {
     "productive": 0.0,
     "unproductive": 0.0,
-    "neutral": 2.0051066875457764
+    "neutral": 86.20321393013
   },
-  "mysqlworkbench.exe": {
+  "shellexperiencehost.exe": {
     "productive": 0.0,
     "unproductive": 0.0,
-    "neutral": 120.282062292099
+    "neutral": 2.0011589527130127
   },
   "searchhost.exe": {
     "productive": 0.0,
     "unproductive": 0.0,
-    "neutral": 4.003323316574097
+    "neutral": 6.003145217895508
   },
-  "ms-teams.exe": {
+  "s3browser-ui.exe": {
     "productive": 0.0,
     "unproductive": 0.0,
-    "neutral": 46.14253115653992
+    "neutral": 76.11740303039551
+  },
+  "snippingtool.exe": {
+    "productive": 0.0,
+    "unproductive": 0.0,
+    "neutral": 6.010932922363281
   }
 }

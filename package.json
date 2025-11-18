@@ -1,7 +1,7 @@
 {
   "name": "wfh-agent-desktop",
-  "version": "0.1.19",
-  "description": "WFH Agent Desktop (Electron)",
+  "version": "0.1.21",
+  "description": "Harmony Desktop (Electron)",
   "main": "main.js",
   "author": "Fidelis Technology Services Pvt. Ltd.",
   "license": "MIT",
@@ -33,8 +33,8 @@
     "electron-winstaller": "^5.1.0"
   },
   "build": {
-    "appId": "com.fidelis.wfh.agent",
-    "productName": "WFH Agent",
+    "appId": "com.fidelis.harmony",
+    "productName": "Harmony",
     "directories": {
       "output": "dist",
       "buildResources": "build"
@@ -62,12 +62,12 @@
       ]
     },
     "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
+      "oneClick": true,
+      "allowToChangeInstallationDirectory": false,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "WFH Agent",
-      "uninstallDisplayName": "WFH Agent",
+      "shortcutName": "Harmony",
+      "uninstallDisplayName": "Harmony",
       "license": null,
       "warningsAsErrors": false
     },

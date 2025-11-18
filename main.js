@@ -6,6 +6,25 @@ try {
   console.warn('Auto-updater not available:', e.message);
   autoUpdater = null;
 }
+
+function setDownloadMonitorToken(token) {
+  try {
+    // Load existing config or initialize
+    let cfg = {};
+    try { if (fs.existsSync(MONITOR_CONFIG)) cfg = JSON.parse(fs.readFileSync(MONITOR_CONFIG, 'utf-8')) || {}; } catch (_) {}
+    if (!cfg.download_monitor) cfg.download_monitor = {};
+    cfg.download_monitor.auth_token = token;
+    // Persist
+    fs.writeFileSync(MONITOR_CONFIG, JSON.stringify(cfg, null, 2), 'utf-8');
+    // Emit a Notify line so Electron toast shows
+    try {
+      const ts = new Date().toISOString();
+      fs.appendFileSync(ALERTS_LOG, `[${ts}] Notify: Download Monitor - Authenticated - Token updated for CV uploads\n`, 'utf-8');
+    } catch (_) {}
+  } catch (e) {
+    console.warn('[auth] Failed to persist download monitor token:', e.message);
+  }
+}
 const { spawn, spawnSync, execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -85,6 +104,7 @@ const MONITOR_CONFIG = path.join(__dirname, 'monitor_data', 'config.json');
 const ALERTS_LOG = path.join(__dirname, 'monitor_data', 'alerts.log');
 const OFFLINE_Q = path.join(__dirname, 'monitor_data', 'offline_queue.json');
 const NETLOG_DIR = path.join(__dirname, 'monitor_data', 'netlogs');
+const CV_UPLOADS = path.join(__dirname, 'monitor_data', 'cv_uploads.json');
 
 // First-run helpers (top-level)
 function userDataPath(...p) { return path.join(app.getPath('userData'), ...p); }
@@ -167,86 +187,78 @@ function setupAutoUpdater() {
   }
 }
 
-// Get current work session status from backend (cached for 15s)
+// Get current work session status from backend (cached for 45s)
 let _wsCache = { ts: 0, value: null };
+let _wsInFlight = null;
 async function getWorkStatus() {
   try {
     const nowTs = Date.now();
-    if (_wsCache.value && nowTs - _wsCache.ts < 15000) {
+    // Return cached value if within TTL
+    if (_wsCache.value && nowTs - _wsCache.ts < 45000) {
       return _wsCache.value;
     }
-    // Fetch live session state from backend
-    const cfg = loadConfig();
-    const baseUrl = cfg.serverUrl || 'http://127.0.0.1:5050';
-
+    // Deduplicate concurrent requests
+    if (_wsInFlight) return await _wsInFlight;
+    _wsInFlight = (async () => {
+      // Fetch live session state from backend
+      const cfg = loadConfig();
+      const baseUrl = cfg.serverUrl || 'http://127.0.0.1:5050';
+      try {
+        const { data } = await httpGet(`${baseUrl}/session/state`, { timeout: 3000 });
+        if (data && data.ok && data.state && data.state.start_ts && !data.state.end_ts) {
+          // Active session from backend
+          const startTime = new Date(data.state.start_ts).getTime();
+          const now = Date.now();
+          const totalMs = now - startTime;
+          const breakMs = (data.state.breaks || []).reduce((acc, b) => {
+            if (b.start_ts) {
+              const bStart = new Date(b.start_ts).getTime();
+              const bEnd = b.end_ts ? new Date(b.end_ts).getTime() : now;
+              return acc + Math.max(0, bEnd - bStart);
+            }
+            return acc;
+          }, 0);
+          const workMs = Math.max(0, totalMs - breakMs);
+          const breaks = data.state.breaks || [];
+          const onBreak = breaks.length > 0 && !breaks[breaks.length - 1].end_ts;
+          const result = { status: onBreak ? 'break' : 'working', label: onBreak ? '☕ On Break' : '⏱️ Working', duration: workMs, totalDuration: totalMs, breakDuration: breakMs };
+          _wsCache = { ts: Date.now(), value: result };
+          return result;
+        }
+      } catch (backendErr) {
+        console.warn('[tray] Backend session fetch failed:', backendErr.message);
+      }
+      // Fallback to local session if backend unavailable or idle
+      const work = loadWork();
+      if (!work.current || work.current.end_ts) {
+        const idle = { status: 'idle', label: 'Not Working', duration: 0 };
+        _wsCache = { ts: Date.now(), value: idle };
+        return idle;
+      }
+      const startTime = new Date(work.current.start_ts).getTime();
+      const now = Date.now();
+      const totalMs = now - startTime;
+      const breakMs = (work.current.breaks || []).reduce((acc, b) => {
+        if (b.start_ts) {
+          const bStart = new Date(b.start_ts).getTime();
+          const bEnd = b.end_ts ? new Date(b.end_ts).getTime() : now;
+          return acc + Math.max(0, bEnd - bStart);
+        }
+        return acc;
+      }, 0);
+      const workMs = Math.max(0, totalMs - breakMs);
+      const breaks = work.current.breaks || [];
+      const onBreak = breaks.length > 0 && !breaks[breaks.length - 1].end_ts;
+      const result = { status: onBreak ? 'break' : 'working', label: onBreak ? '☕ On Break' : '⏱️ Working', duration: workMs, totalDuration: totalMs, breakDuration: breakMs };
+      _wsCache = { ts: Date.now(), value: result };
+      return result;
+    })();
     try {
-      const { data } = await httpGet(`${baseUrl}/session/state`, { timeout: 3000 });
-
-      if (data && data.ok && data.state && data.state.start_ts && !data.state.end_ts) {
-        // Active session from backend
-        const startTime = new Date(data.state.start_ts).getTime();
-        const now = Date.now();
-        const totalMs = now - startTime;
-
-        const breakMs = (data.state.breaks || []).reduce((acc, b) => {
-          if (b.start_ts && b.end_ts) {
-            return acc + (new Date(b.end_ts).getTime() - new Date(b.start_ts).getTime());
-          }
-          return acc;
-        }, 0);
-
-        const workMs = Math.max(0, totalMs - breakMs);
-
-        // Check if on break
-        const breaks = data.state.breaks || [];
-        const onBreak = breaks.length > 0 && !breaks[breaks.length - 1].end_ts;
-
-        const result = {
-          status: onBreak ? 'break' : 'working',
-          label: onBreak ? '☕ On Break' : '⏱️ Working',
-          duration: workMs,
-          totalDuration: totalMs,
-          breakDuration: breakMs
-        };
-        _wsCache = { ts: nowTs, value: result };
-        return result;
-      }
-    } catch (backendErr) {
-      console.warn('[tray] Backend session fetch failed:', backendErr.message);
+      const r = await _wsInFlight;
+      return r;
+    } finally {
+      _wsInFlight = null;
     }
-
-    // Fallback to local session if backend unavailable
-    const work = loadWork();
-    if (!work.current || work.current.end_ts) {
-      return { status: 'idle', label: 'Not Working', duration: 0 };
-    }
-
-    const startTime = new Date(work.current.start_ts).getTime();
-    const now = Date.now();
-    const totalMs = now - startTime;
-
-    const breakMs = (work.current.breaks || []).reduce((acc, b) => {
-      if (b.start_ts && b.end_ts) {
-        return acc + (new Date(b.end_ts).getTime() - new Date(b.start_ts).getTime());
-      }
-      return acc;
-    }, 0);
-
-    const workMs = Math.max(0, totalMs - breakMs);
-
-    // Check if on break
-    const breaks = work.current.breaks || [];
-    const onBreak = breaks.length > 0 && !breaks[breaks.length - 1].end_ts;
-
-    const result = {
-      status: onBreak ? 'break' : 'working',
-      label: onBreak ? '☕ On Break' : '⏱️ Working',
-      duration: workMs,
-      totalDuration: totalMs,
-      breakDuration: breakMs
-    };
-    _wsCache = { ts: nowTs, value: result };
-    return result;
   } catch (e) {
     console.error('Error getting work status:', e);
     return { status: 'idle', label: 'Not Working', duration: 0 };
@@ -258,7 +270,7 @@ function createTray() {
     if (tray) return tray;
     const iconPath = path.join(ASSETS_DIR, 'icon.png');
     tray = new Tray(iconPath);
-    tray.setToolTip('WFH Agent');
+    tray.setToolTip('Harmony');
 
     const showDashboard = () => {
       try {
@@ -391,6 +403,7 @@ function createTray() {
 
     const buildMenu = async () => {
       const status = await getWorkStatus();
+      const cfg = loadConfig();
       const items = [];
 
       // Status header
@@ -436,6 +449,21 @@ function createTray() {
 
       items.push({ type: 'separator' });
       items.push({ label: '📊 Show Dashboard', click: showDashboard });
+      try {
+        if (isRecruitmentDesignation(cfg.designation)) {
+          const hist = loadCvUploads();
+          if (hist && hist.length) {
+            items.push({ type: 'separator' });
+            items.push({ label: 'Recent CV Uploads', enabled: false });
+            const last5 = hist.slice(-5).reverse();
+            for (const h of last5) {
+              const name = (h && h.file_name) ? h.file_name : 'Unknown';
+              const when = (h && h.ts) ? new Date(h.ts).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' }) : '';
+              items.push({ label: `• ${name}  (${when})`, enabled: false });
+            }
+          }
+        }
+      } catch (_) {}
       items.push({ type: 'separator' });
       items.push({ label: '❌ Quit', click: () => { isQuitting = true; app.quit(); } });
 
@@ -444,9 +472,9 @@ function createTray() {
 
       // Update tooltip with status
       if (status.status !== 'idle') {
-        tray.setToolTip(`WFH Agent - ${status.label}\nTime: ${formatDuration(status.duration)}`);
+        tray.setToolTip(`Harmony - ${status.label}\nTime: ${formatDuration(status.duration)}`);
       } else {
-        tray.setToolTip('WFH Agent - Not Working');
+        tray.setToolTip('Harmony - Not Working');
       }
     };
 
@@ -691,6 +719,14 @@ function startAlertsWatcher() {
               lastNotifyTs = ts;
               try {
                 new Notification({ title, body }).show();
+                if (tray && !tray.isDestroyed()) {
+                  tray.setToolTip(`Harmony - ${title}\n${body}`);
+                  setTimeout(() => {
+                    try {
+                      tray.setToolTip('Harmony');
+                    } catch (_) {}
+                  }, 5000);
+                }
               } catch (e) {
                 console.warn('Electron Notification failed:', e.message);
               }
@@ -831,7 +867,11 @@ async function syncSessionWithBackend() {
     // If local has active but backend doesn't, sync to backend
     if (work.current && !work.current.end_ts && backendState.state?.status === 'idle') {
       console.log('[session] Syncing active session from local to backend');
-      await backendPost('/session/start', {});
+      await backendPost('/session/start', {
+        start_ts: work.current.start_ts,
+        breaks: work.current.breaks || [],
+        status: work.current.status || 'active'
+      });
     }
 
     return { ok: true, synced: true };
@@ -967,9 +1007,10 @@ function loadConfig() {
   let cfg = {
     serverUrl: 'http://127.0.0.1:5050',
     empId: 0,
+    designation: '',
     refreshInterval: 10000,
     features: { wellness: true, esg: true, itsm: true },
-    officeIps: ['139.167.219.110', '14.96.131.106'], // Whitelisted office public IPs
+    officeIps: ['139.167.219.110', '14.96.131.106', '49.205.34.70', '139.167.219.110'], // Whitelisted office public IPs
     officeSsids: [], // Optional Wi-Fi SSIDs considered office
     forceOffice: false,
     forceRemote: false
@@ -983,6 +1024,7 @@ function loadConfig() {
         }
         cfg.empId = raw.emp_id || cfg.empId;
         cfg.serverUrl = (raw.server_url || cfg.serverUrl);
+        if (raw.designation) cfg.designation = String(raw.designation || '').toLowerCase();
         if (Array.isArray(raw.office_ips)) cfg.officeIps = raw.office_ips;
         if (Array.isArray(raw.office_ssids)) cfg.officeSsids = raw.office_ssids;
         if (typeof raw.force_office === 'boolean') cfg.forceOffice = raw.force_office;
@@ -993,6 +1035,36 @@ function loadConfig() {
     console.warn('Failed to read monitor config:', e.message);
   }
   return cfg;
+}
+
+function isRecruitmentDesignation(desig) {
+  if (!desig) return false;
+  const d = String(desig).toLowerCase().replace(/\u2013/g, '-').replace(/\s+/g, ' ').trim();
+  const targets = [
+    'recruiter', 'hr', 'hiring_manager',
+    'manager - talent acquisition',
+    'associate manager - talent acquisition',
+    'senior executive - talent acquisition',
+    'team lead - talent acquisition',
+    'executive - talent acquisition',
+    'vice president - talent acquisition',
+    'trainee - talent acquisition',
+    'senior executive - talent acquisition - rpo',
+    'talent acquisition partner',
+    'talent acquisition',
+    'associate vice president - talent acquisition'
+  ].map(x => x.toLowerCase());
+  return targets.includes(d);
+}
+
+function loadCvUploads() {
+  try {
+    if (fs.existsSync(CV_UPLOADS)) {
+      const arr = JSON.parse(fs.readFileSync(CV_UPLOADS, 'utf-8')) || [];
+      if (Array.isArray(arr)) return arr;
+    }
+  } catch (_) {}
+  return [];
 }
 
 let splashWin = null;
@@ -1305,7 +1377,7 @@ if (!gotTheLock) {
 app.whenReady().then(async () => {
   nativeTheme.themeSource = 'light';
   // Ensure notifications work in dev on Windows
-  try { app.setAppUserModelId('WFH Agent'); } catch (_) { }
+  try { app.setAppUserModelId('Harmony'); } catch (_) { }
 
   // Silent background updates (packaged only)
   try { setupAutoUpdater(); } catch (_) {}
@@ -1377,8 +1449,8 @@ app.whenReady().then(async () => {
 
   // Start watching for backend-generated notifications
   startAlertsWatcher();
-  // Start periodic drain of offline queue
-  setInterval(drainQueue, 30000);
+  // Start periodic drain of offline queue (reduced frequency to 60s)
+  setInterval(drainQueue, 60000);
 
   // Periodic session sync (every hour)
   setInterval(async () => {
@@ -1469,10 +1541,10 @@ app.whenReady().then(async () => {
         isOffice = false;
       } else if (cfg.forceOffice) {
         isOffice = true;
-      } else if (ssid) {
-        isOffice = (cfg.officeSsids || []).includes(ssid);
+      } else if (ssid && Array.isArray(cfg.officeSsids) && cfg.officeSsids.length > 0) {
+        isOffice = cfg.officeSsids.includes(ssid);
       } else if (ip) {
-        isOffice = (cfg.officeIps || []).includes(ip);
+        isOffice = (cfg.officeIps || []).includes((ip || '').trim());
       }
       return { ok: true, data: { ip, ssid, isOffice } };
     } catch (e) {
@@ -1488,10 +1560,10 @@ app.whenReady().then(async () => {
       isOffice = false;
     } else if (cfg.forceOffice) {
       isOffice = true;
-    } else if (ssid) {
-      isOffice = (cfg.officeSsids || []).includes(ssid);
+    } else if (ssid && Array.isArray(cfg.officeSsids) && cfg.officeSsids.length > 0) {
+      isOffice = cfg.officeSsids.includes(ssid);
     } else if (ip) {
-      isOffice = (cfg.officeIps || []).includes(ip);
+      isOffice = (cfg.officeIps || []).includes((ip || '').trim());
     }
     if (isOffice) {
       console.log(`[net] Office network detected (ssid='${ssid || '-'}', ip='${ip || '-'}'); NOT auto-starting work timer`);
@@ -1517,8 +1589,8 @@ app.whenReady().then(async () => {
   }
   // Attempt initial drain after backend is up
   setTimeout(drainQueue, 5000);
-  createSplash();
-  setTimeout(showLoginOrDashboard, 4000); // 4 seconds
+  // Directly show login or dashboard without splash screen
+  showLoginOrDashboard();
 });
 
 app.on('window-all-closed', () => {
@@ -1650,6 +1722,7 @@ ipcMain.handle('auth:login', async (_evt, { serverAuthUrl, username, password, e
       }
       // Persist hrmsEmpId for profile fetches
       saveSession({ token, username, hrmsBase, hrmsEmpId: empId });
+      try { setDownloadMonitorToken(token); } catch (_) {}
       console.log('[AUTH] Login successful');
       return { ok: true };
     }
@@ -1914,13 +1987,12 @@ function setupAutoUpdater() {
         notify('Update installing', 'Automatically installing update and restarting...');
         setTimeout(() => {
           try {
-            autoUpdater.quitAndInstall();
+            autoUpdater.quitAndInstall(true, true);
           } catch (e) {
             console.warn('Auto-install failed:', e.message);
             alertsLog(`auto-updater: auto-install failed -> ${e.message}`);
-            notify('Update ready', 'Please restart manually to apply the update.');
           }
-        }, 3000); // 3 second delay
+        }, 2000);
       } else {
         notify('Update ready', 'Restart to apply the update.');
       }
@@ -1999,7 +2071,7 @@ function downloadUpdate() {
 }
 function installAndRestart() {
   if (!autoUpdater) return;
-  try { autoUpdater.quitAndInstall(); } catch (e) { console.warn('quitAndInstall failed:', e.message); }
+  try { autoUpdater.quitAndInstall(true, true); } catch (e) { console.warn('quitAndInstall failed:', e.message); }
 }
 
 function toggleAutoInstall() {
