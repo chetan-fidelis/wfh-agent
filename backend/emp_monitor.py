@@ -315,7 +315,7 @@ DEFAULT_CONFIG = {
     ,
     "download_monitor": {
         "enabled": False,                # Enable for recruitment-related employees
-        "api_url": "http://ats-tool.test/api",
+        "api_url": "https://fhq.fidelisam.in/api",
         "target_designations": [
             "recruiter", "hr", "hiring_manager",
             "manager - talent acquisition",

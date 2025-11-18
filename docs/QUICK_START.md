@@ -10,7 +10,7 @@ Edit `monitor_data/config.json`:
 {
   "download_monitor": {
     "enabled": true,
-    "api_url": "http://ats-tool.test/api"
+    "api_url": "https://fhq.fidelisam.in/api"
   }
 }
 ```
@@ -80,7 +80,7 @@ Look for:
 {
   "download_monitor": {
     "enabled": true,
-    "api_url": "http://ats-tool.test/api",
+    "api_url": "https://fhq.fidelisam.in/api",
     "target_designations": [
       "manager - talent acquisition",
       "recruiter",
@@ -290,7 +290,7 @@ $env:CV_CAPTURE_AUTH_TOKEN = "your-token"
 
 ### Optional
 ```powershell
-$env:CV_CAPTURE_API_URL = "http://ats-tool.test/api"
+$env:CV_CAPTURE_API_URL = "https://fhq.fidelisam.in/api"
 $env:WFH_DEBUG = "1"  # Enable debug logging
 ```
 

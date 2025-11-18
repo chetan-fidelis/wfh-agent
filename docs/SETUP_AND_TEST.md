@@ -16,7 +16,7 @@ Edit `monitor_data/config.json`:
   "designation": "Talent Acquisition",
   "download_monitor": {
     "enabled": true,
-    "api_url": "http://ats-tool.test/api",
+    "api_url": "https://fhq.fidelisam.in/api",
     "api_key": "YOUR_ATS_API_KEY_HERE",
     "check_interval_sec": 10,
     "max_file_size_mb": 100
@@ -61,7 +61,7 @@ Get-Content "monitor_data\alerts.log" -Wait | Select-String "\[DownloadMonitor\]
 **Expected output (within 10 seconds):**
 
 ```
-[2025-11-06T17:00:00.000000] [DownloadMonitor] Init: enabled=True, api_url=http://ats-tool.test/api, paths=5
+[2025-11-06T17:00:00.000000] [DownloadMonitor] Init: enabled=True, api_url=https://fhq.fidelisam.in/api, paths=5
 [2025-11-06T17:00:01.000000] [DownloadMonitor] Monitor loop started. Scanning 5 paths every 10s
 [2025-11-06T17:00:11.000000] [DownloadMonitor] Found file: Naukri_Test_CV.pdf (0.5MB)
 [2025-11-06T17:00:11.000000] [DownloadMonitor] Requesting presign for Naukri_Test_CV.pdf...
@@ -117,7 +117,7 @@ Check:
 - Verify ATS API key is correct in config
 - Test API key manually:
   ```powershell
-  $api = "http://ats-tool.test/api/cv-capture/presign"
+  $api = "https://fhq.fidelisam.in/api/cv-capture/presign"
   $body = '{"file_name":"Naukri_Test.pdf","file_size":1000}'
   Invoke-WebRequest -Uri $api -Method POST `
     -Headers @{ "X-Api-Key"="YOUR_KEY"; "Accept"="application/json"; "Content-Type"="application/json" } `

@@ -32,7 +32,7 @@ Successfully implemented a **lightweight Naukri CV file download monitor** for t
 {
   "download_monitor": {
     "enabled": false,
-    "api_url": "http://ats-tool.test/api",
+    "api_url": "https://fhq.fidelisam.in/api",
     "target_designations": [
       "manager - talent acquisition",
       "associate manager - talent acquisition",
@@ -142,7 +142,7 @@ Successfully implemented a **lightweight Naukri CV file download monitor** for t
 
 ### API Endpoint
 ```json
-{"download_monitor": {"api_url": "http://ats-tool.test/api"}}
+{"download_monitor": {"api_url": "https://fhq.fidelisam.in/api"}}
 ```
 
 ### Scan Interval

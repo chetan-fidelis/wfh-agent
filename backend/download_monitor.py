@@ -47,7 +47,7 @@ class DownloadMonitor:
         
         # API config
         dm_cfg = config.get('download_monitor', {})
-        api_url = dm_cfg.get('api_url', 'http://ats-tool.test/api')
+        api_url = dm_cfg.get('api_url', 'https://fhq.fidelisam.in/api')
         # Remove trailing /api if present, then remove trailing slash
         if api_url.endswith('/api'):
             self.api_base = api_url[:-4]  # Remove '/api'
