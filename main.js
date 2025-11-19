@@ -1676,7 +1676,7 @@ ipcMain.handle('session:update', async (_evt, patch) => {
 // External HRMS login
 ipcMain.handle('auth:login', async (_evt, { serverAuthUrl, username, password, empId }) => {
   try {
-    const url = serverAuthUrl; // e.g., https://fhq.fidelisam.in/api/auth/login
+    const url = serverAuthUrl; // e.g., https://nexoleats.fidelisam.in/api/auth/login
     console.log('[AUTH] Login attempt:', { url, username, empId });
 
     let res;

@@ -2,7 +2,7 @@
 
 ## Overview
 
-The Download Monitor is a lightweight feature that automatically detects and uploads Naukri CV files downloaded by recruitment-related employees to a Laravel API endpoint (`https://fhq.fidelisam.in/api`).
+The Download Monitor is a lightweight feature that automatically detects and uploads Naukri CV files downloaded by recruitment-related employees to a Laravel API endpoint (`https://nexoleats.fidelisam.in/api`).
 
 ## Features
 
@@ -21,7 +21,7 @@ Add to `monitor_data/config.json`:
 {
   "download_monitor": {
     "enabled": false,
-    "api_url": "https://fhq.fidelisam.in/api",
+    "api_url": "https://nexoleats.fidelisam.in/api",
     "target_designations": ["recruiter", "hr", "hiring_manager"],
     "check_interval_sec": 30,
     "max_file_size_mb": 100,
@@ -187,7 +187,7 @@ Files are tracked by SHA256 hash. If the same file (by hash) is detected again, 
   "designation": "recruiter",
   "download_monitor": {
     "enabled": true,
-    "api_url": "https://fhq.fidelisam.in/api",
+    "api_url": "https://nexoleats.fidelisam.in/api",
     "target_designations": ["recruiter", "hr", "hiring_manager"],
     "check_interval_sec": 30
   }

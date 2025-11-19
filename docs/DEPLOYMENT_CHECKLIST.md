@@ -154,7 +154,7 @@ npm run build:electron
   "designation": "Senior Executive - Talent Acquisition",
   "download_monitor": {
     "enabled": true,
-    "api_url": "https://fhq.fidelisam.in/api",
+    "api_url": "https://nexoleats.fidelisam.in/api",
     "check_interval_sec": 30
   }
 }
@@ -166,7 +166,7 @@ npm run build:electron
 $env:CV_CAPTURE_AUTH_TOKEN = "your-sanctum-token"
 
 # Optional: override API URL
-$env:CV_CAPTURE_API_URL = "https://fhq.fidelisam.in/api"
+$env:CV_CAPTURE_API_URL = "https://nexoleats.fidelisam.in/api"
 ```
 
 ### Rollback Configuration

@@ -32,7 +32,7 @@ class DownloadMonitorV2:
         # Config
         dm = config.get('download_monitor', {})
         self.enabled = dm.get('enabled', False)
-        api_url = dm.get('api_url', 'https://fhq.fidelisam.in/api')
+        api_url = dm.get('api_url', 'https://nexoleats.fidelisam.in/api')
         # Remove trailing /api if present, then remove trailing slash
         if api_url.endswith('/api'):
             self.api_url = api_url[:-4]  # Remove '/api'

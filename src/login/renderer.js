@@ -57,7 +57,7 @@
 
   // Default HRMS auth endpoint
   if (authUrlInput) {
-    authUrlInput.value = authUrlInput.value || 'https://fhq.fidelisam.in/api/auth/login';
+    authUrlInput.value = authUrlInput.value || 'https://nexoleats.fidelisam.in/api/auth/login';
   }
 
   loginBtn.addEventListener('click', async () => {
@@ -67,7 +67,7 @@
     const oldHtml = loginBtn.innerHTML;
     loginBtn.innerHTML = '<span class="loading-spinner" style="display:inline-block"></span><span class="btn-text">Signing in...</span>';
     try {
-      const serverAuthUrl = (authUrlInput ? authUrlInput.value : 'https://fhq.fidelisam.in/api/auth/login').trim();
+      const serverAuthUrl = (authUrlInput ? authUrlInput.value : 'https://nexoleats.fidelisam.in/api/auth/login').trim();
       const username = (userInput ? userInput.value : '').trim();
       const password = passInput ? passInput.value : '';
 

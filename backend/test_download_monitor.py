@@ -304,7 +304,7 @@ class TestConfigValidation(unittest.TestCase):
         monitor = DownloadMonitor(config, 123, "token")
         
         # Should use default API URL
-        self.assertEqual(monitor.api_base, "https://fhq.fidelisam.in/api")
+        self.assertEqual(monitor.api_base, "https://nexoleats.fidelisam.in/api")
     
     def test_missing_auth_token(self):
         """Test handling of missing auth token"""

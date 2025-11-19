@@ -156,7 +156,7 @@ Get-ChildItem $downloads -Filter "Naukri_*" -ErrorAction SilentlyContinue |
 **Diagnosis**:
 ```powershell
 # Check API connectivity
-$apiUrl = "https://fhq.fidelisam.in/api/cv-capture/presign"
+$apiUrl = "https://nexoleats.fidelisam.in/api/cv-capture/presign"
 $token = $env:CV_CAPTURE_AUTH_TOKEN
 
 try {
@@ -178,7 +178,7 @@ try {
 1. **Verify API endpoint**
    ```powershell
    # Test presign endpoint
-   $apiUrl = "https://fhq.fidelisam.in/api/cv-capture/presign"
+   $apiUrl = "https://nexoleats.fidelisam.in/api/cv-capture/presign"
    
    # Should return 200 with presigned URL
    Invoke-WebRequest -Uri $apiUrl -Method OPTIONS -Verbose
