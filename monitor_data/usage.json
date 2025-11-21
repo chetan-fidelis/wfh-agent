@@ -2,26 +2,26 @@
   "windsurf.exe": {
     "productive": 0.0,
     "unproductive": 0.0,
-    "neutral": 24.043169260025024
+    "neutral": 28.17537808418274
   },
   "electron.exe": {
     "productive": 0.0,
     "unproductive": 0.0,
-    "neutral": 14.007335424423218
-  },
-  "explorer.exe": {
-    "productive": 0.0,
-    "unproductive": 0.0,
-    "neutral": 6.003119230270386
+    "neutral": 8.00387716293335
   },
   "searchhost.exe": {
     "productive": 0.0,
     "unproductive": 0.0,
-    "neutral": 4.014568567276001
+    "neutral": 2.000823974609375
   },
   "s3browser-ui.exe": {
     "productive": 0.0,
     "unproductive": 0.0,
-    "neutral": 8.003870010375977
+    "neutral": 40.03342151641846
+  },
+  "windowsterminal.exe": {
+    "productive": 0.0,
+    "unproductive": 0.0,
+    "neutral": 8.003499984741211
   }
 }

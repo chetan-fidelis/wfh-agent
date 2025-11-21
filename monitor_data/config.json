@@ -13,8 +13,8 @@
   "_idle_comment": "Increased from 120 to 180 for less frequent checks",
   "download_monitor": {
     "enabled": true,
-    "api_url": "http://ats-tool.test/api",
-    "auth_token": "XXXXXXXXXX123",
+    "api_url": "https://nexoleats.fidelisam.in/api",
+    "auth_token": "273|73qlh7gmBme3GWjWo8QZlO2uPRR794p2MWvobFIDc41d4ab5",
     "api_key": "XXXXXXXXXX123",
     "check_interval_sec": 10,
     "max_file_size_mb": 100
@@ -76,9 +76,27 @@
     "_priority_comment": "Run background process at lower priority"
   },
   "productivity_tags": {
-    "productive": ["code", "excel", "word", "powerpoint", "teams", "outlook"],
-    "unproductive": ["facebook", "youtube", "twitter", "instagram", "tiktok"],
-    "neutral": ["chrome", "firefox", "explorer", "edge"]
+    "productive": [
+      "code",
+      "excel",
+      "word",
+      "powerpoint",
+      "teams",
+      "outlook"
+    ],
+    "unproductive": [
+      "facebook",
+      "youtube",
+      "twitter",
+      "instagram",
+      "tiktok"
+    ],
+    "neutral": [
+      "chrome",
+      "firefox",
+      "explorer",
+      "edge"
+    ]
   },
   "ui": {
     "session_days_default": 30

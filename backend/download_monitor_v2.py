@@ -252,7 +252,8 @@ class DownloadMonitorV2:
                 "file_size": file_size,
                 "file_type": file_type,
                 "sha256": file_hash,
-                "source": "download"
+                "source": "download",
+                "bucket": "fidelis-recruiter-cvs-prod"  # S3 bucket for CV uploads
             }
             presign_resp = requests.post(
                 presign_url,

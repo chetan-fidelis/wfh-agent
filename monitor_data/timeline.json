@@ -1,7 +1,12 @@
 {
   "2025-11-21": {
     "15": {
-      "active": 56,
+      "active": 24,
+      "idle": 0,
+      "offline": 0
+    },
+    "16": {
+      "active": 62,
       "idle": 0,
       "offline": 0
     }
