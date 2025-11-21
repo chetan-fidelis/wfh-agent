@@ -1,6 +1,6 @@
 {
   "name": "wfh-agent-desktop",
-  "version": "0.1.22",
+  "version": "0.1.23",
   "description": "Harmony Desktop (Electron)",
   "main": "main.js",
   "author": "Fidelis Technology Services Pvt. Ltd.",
