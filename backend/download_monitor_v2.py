@@ -335,9 +335,24 @@ class DownloadMonitorV2:
             return False
     
     def _write_history(self, file_name: str, file_size: int):
-        """Write to cv_uploads.json."""
+        """Write to cv_uploads.json in per-user Electron userData directory."""
         try:
-            base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'monitor_data'))
+            # Use Electron's userData directory for per-user history
+            # Windows: %APPDATA%\wfh-agent-desktop\monitor_data\cv_uploads.json
+            # macOS: ~/Library/Application Support/wfh-agent-desktop/monitor_data/cv_uploads.json
+            # Linux: ~/.config/wfh-agent-desktop/monitor_data/cv_uploads.json
+            if sys.platform == 'win32':
+                app_name = 'wfh-agent-desktop'
+                user_data = os.path.join(os.environ.get('APPDATA', ''), app_name)
+            elif sys.platform == 'darwin':
+                app_name = 'wfh-agent-desktop'
+                user_data = os.path.join(os.path.expanduser('~/Library/Application Support'), app_name)
+            else:  # Linux
+                app_name = 'wfh-agent-desktop'
+                user_data = os.path.join(os.path.expanduser('~/.config'), app_name)
+            
+            base_dir = os.path.join(user_data, 'monitor_data')
+            os.makedirs(base_dir, exist_ok=True)
             hist_path = os.path.join(base_dir, 'cv_uploads.json')
             
             data = []

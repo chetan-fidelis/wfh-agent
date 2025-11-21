@@ -3365,30 +3365,21 @@ class MonitorApp:
         
         # Start download monitor for recruitment employees (Naukri file tracking)
         try:
-            dm_cfg = self.cfg.data.get('download_monitor', {})
-            if dm_cfg.get('enabled', False) and DOWNLOAD_MONITOR_AVAILABLE:
+            if not DOWNLOAD_MONITOR_AVAILABLE:
+                Alerts.log("[DownloadMonitor] Module not available")
+            else:
+                dm_cfg = self.cfg.data.get('download_monitor', {})
                 emp_id = int(self.cfg.data.get('emp_id', 0))
                 designation = self.cfg.data.get('designation', '')
                 
-                # Start if explicitly enabled via config regardless of designation
-                if dm_cfg.get('enabled', False):
-                    Alerts.log(f"[DownloadMonitor] Starting (enabled via config): emp_id={emp_id}, designation={designation or ''}")
+                # Start if explicitly enabled via config OR if recruitment designation detected
+                if dm_cfg.get('enabled', False) or is_recruitment_designation(designation):
+                    Alerts.log(f"[DownloadMonitor] Starting: emp_id={emp_id}, designation={designation or ''}")
                     self.download_monitor = DownloadMonitor(self.cfg.data, emp_id)
                     self.download_monitor.start()
-                    Alerts.log(f"[DownloadMonitor] Monitor started (config enabled)")
-                # Otherwise, start based on recruitment designation heuristic
-                elif is_recruitment_designation(designation):
-                    Alerts.log(f"[DownloadMonitor] Starting: emp_id={emp_id}, designation={designation}")
-                    self.download_monitor = DownloadMonitor(self.cfg.data, emp_id)
-                    self.download_monitor.start()
-                    Alerts.log(f"[DownloadMonitor] Monitor started for recruitment employee")
+                    Alerts.log(f"[DownloadMonitor] Monitor started")
                 else:
-                    Alerts.log(f"[DownloadMonitor] Skipped: designation '{designation}' is not recruitment-related")
-            else:
-                if not dm_cfg.get('enabled', False):
-                    Alerts.log("[DownloadMonitor] Disabled in config")
-                if not DOWNLOAD_MONITOR_AVAILABLE:
-                    Alerts.log("[DownloadMonitor] Module not available")
+                    Alerts.log(f"[DownloadMonitor] Skipped: not enabled in config and designation '{designation}' is not recruitment-related")
         except Exception as e:
             Alerts.log(f"[DownloadMonitor] Start error: {e}")
 

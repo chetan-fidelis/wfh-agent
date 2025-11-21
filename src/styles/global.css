@@ -379,7 +379,7 @@ body::-webkit-scrollbar-thumb
 
 .profile-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr 1fr 1fr;
   gap: 20px;
 }
 
@@ -820,6 +820,12 @@ body::-webkit-scrollbar-thumb
 @media (max-width: 1200px) {
   .kpi-grid {
     grid-template-columns: 1fr 1fr 1fr 1fr 1fr;
+  }
+}
+
+@media (max-width: 1024px) {
+  .profile-grid {
+    grid-template-columns: 1fr 1fr;
   }
 }
 

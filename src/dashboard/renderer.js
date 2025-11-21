@@ -7,6 +7,8 @@
   const empMetaEl = document.getElementById('empMeta');
   const mgrNameEl = document.getElementById('mgrName');
   const mgrMetaEl = document.getElementById('mgrMeta');
+  const sysInfoEl = document.getElementById('sysInfo');
+  const sysMetaEl = document.getElementById('sysMeta');
   const kpiTotalWork = document.getElementById('kpiTotalWork');
   const kpiSessions = document.getElementById('kpiSessions');
   const kpiBreak = document.getElementById('kpiBreak');
@@ -389,6 +391,23 @@
     });
   }
 
+  async function loadSystemInfo() {
+    try {
+      const appVer = await window.api.getVersion();
+      const osInfo = await window.api.getSystemInfo();
+      
+      const osName = osInfo && osInfo.platform ? osInfo.platform.toUpperCase() : 'Unknown';
+      const osArch = osInfo && osInfo.arch ? osInfo.arch : '';
+      const appVersion = appVer && appVer.app ? `v${appVer.app}` : 'Unknown';
+      
+      sysInfoEl.textContent = `${osName} ${osArch}`;
+      sysMetaEl.textContent = `Harmony ${appVersion}`;
+    } catch (e) {
+      sysInfoEl.textContent = 'System';
+      sysMetaEl.textContent = 'Info unavailable';
+    }
+  }
+
   async function loadProfile() {
     try {
       const cfg = await window.api.getConfig();
@@ -408,8 +427,11 @@
         mgrNameEl.textContent = '—';
         mgrMetaEl.textContent = '';
       }
+      // Load system info
+      loadSystemInfo();
     } catch (e) {
       empMetaEl.textContent = e.message || 'Failed to load profile';
+      loadSystemInfo();
     }
   }
 

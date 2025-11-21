@@ -1,6 +1,6 @@
 {
   "name": "wfh-agent-desktop",
-  "version": "0.1.21",
+  "version": "0.1.22",
   "description": "Harmony Desktop (Electron)",
   "main": "main.js",
   "author": "Fidelis Technology Services Pvt. Ltd.",
@@ -69,7 +69,11 @@
       "shortcutName": "Harmony",
       "uninstallDisplayName": "Harmony",
       "license": null,
-      "warningsAsErrors": false
+      "warningsAsErrors": false,
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerHeaderIcon": "assets/icon.ico",
+      "include": "installer-custom.nsi"
     },
     "compression": "maximum",
     "electronLanguages": [

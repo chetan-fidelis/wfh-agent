@@ -36,6 +36,8 @@ contextBridge.exposeInMainWorld('api', {
   updaterInstall: () => ipcRenderer.invoke('updater:install'),
   // App info
   appVersion: () => ipcRenderer.invoke('app:version'),
+  getVersion: () => ipcRenderer.invoke('app:version'),
+  getSystemInfo: () => ipcRenderer.invoke('system:info'),
   // Native notification
   notify: (title, body) => ipcRenderer.invoke('notify', { title, body })
 });

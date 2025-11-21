@@ -1,5 +1,5 @@
 """
-Unit tests for download_monitor.py
+Unit tests for download_monitor_v2.py
 Run with: python -m pytest test_download_monitor.py -v
 """
 
@@ -15,7 +15,7 @@ from pathlib import Path
 # Add backend to path
 sys.path.insert(0, os.path.dirname(__file__))
 
-from download_monitor import DownloadMonitor
+from download_monitor_v2 import DownloadMonitorV2 as DownloadMonitor
 
 
 class TestDownloadMonitor(unittest.TestCase):
@@ -200,8 +200,8 @@ class TestDownloadMonitor(unittest.TestCase):
         paths_str = " ".join(monitor.download_paths).lower()
         self.assertTrue("downloads" in paths_str or "desktop" in paths_str)
     
-    @patch('download_monitor.requests.post')
-    @patch('download_monitor.requests.put')
+    @patch('download_monitor_v2.requests.post')
+    @patch('download_monitor_v2.requests.put')
     def test_upload_file_success(self, mock_put, mock_post):
         """Test successful file upload"""
         monitor = DownloadMonitor(self.config, self.emp_id, self.auth_token)

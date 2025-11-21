@@ -28,6 +28,7 @@ function setDownloadMonitorToken(token) {
 const { spawn, spawnSync, execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const https = require('https');
 let axios; try { axios = require('axios'); } catch (_) { axios = null; }
 
@@ -104,11 +105,11 @@ const MONITOR_CONFIG = path.join(__dirname, 'monitor_data', 'config.json');
 const ALERTS_LOG = path.join(__dirname, 'monitor_data', 'alerts.log');
 const OFFLINE_Q = path.join(__dirname, 'monitor_data', 'offline_queue.json');
 const NETLOG_DIR = path.join(__dirname, 'monitor_data', 'netlogs');
-const CV_UPLOADS = path.join(__dirname, 'monitor_data', 'cv_uploads.json');
 
 // First-run helpers (top-level)
 function userDataPath(...p) { return path.join(app.getPath('userData'), ...p); }
 function firstRunFlagPath() { return userDataPath('first-run.json'); }
+function getCvUploadsPath() { return userDataPath('monitor_data', 'cv_uploads.json'); }
 function ensureFirstRunCleanup() {
   try {
     if (!fs.existsSync(firstRunFlagPath())) {
@@ -767,6 +768,25 @@ ipcMain.handle('app:version', async () => {
   }
 });
 
+// System info (OS, architecture)
+ipcMain.handle('system:info', async () => {
+  try {
+    const osModule = require('os');
+    return {
+      ok: true,
+      platform: osModule.platform(),
+      arch: osModule.arch(),
+      cpus: osModule.cpus().length,
+      totalMemory: osModule.totalmem(),
+      freeMemory: osModule.freemem(),
+      hostname: osModule.hostname(),
+      uptime: osModule.uptime()
+    };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
 // ---------------- Work Session Engine (local prototype) ----------------
 function nowIso() { return new Date().toISOString(); }
 function loadWork() {
@@ -1016,8 +1036,13 @@ function loadConfig() {
     forceRemote: false
   };
   try {
-    if (fs.existsSync(MONITOR_CONFIG)) {
-      const raw = JSON.parse(fs.readFileSync(MONITOR_CONFIG, 'utf-8'));
+    // Prefer per-user roaming config first (survives updates, per-user settings)
+    const roamingConfigPath = path.join(os.homedir(), 'AppData', 'Roaming', 'wfh-agent-desktop', 'monitor_data', 'config.json');
+    const bundledConfigPath = MONITOR_CONFIG;
+    const configPath = fs.existsSync(roamingConfigPath) ? roamingConfigPath : bundledConfigPath;
+    
+    if (fs.existsSync(configPath)) {
+      const raw = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
       if (raw) {
         if (raw.ingestion && raw.ingestion.mode) {
           // keep
@@ -1059,8 +1084,9 @@ function isRecruitmentDesignation(desig) {
 
 function loadCvUploads() {
   try {
-    if (fs.existsSync(CV_UPLOADS)) {
-      const arr = JSON.parse(fs.readFileSync(CV_UPLOADS, 'utf-8')) || [];
+    const cvPath = getCvUploadsPath();
+    if (fs.existsSync(cvPath)) {
+      const arr = JSON.parse(fs.readFileSync(cvPath, 'utf-8')) || [];
       if (Array.isArray(arr)) return arr;
     }
   } catch (_) {}
